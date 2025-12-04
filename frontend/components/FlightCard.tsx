@@ -14,9 +14,10 @@ interface FlightCardProps {
 export default function FlightCard({ flight, index, isBestPrice }: FlightCardProps) {
   const [isExpanded, setIsExpanded] = useState(index === 0); // First flight expanded by default
 
-  const formatDuration = (minutes: number) => {
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
+  const formatDuration = (minutes: number | string) => {
+    const totalMinutes = typeof minutes === 'string' ? parseInt(minutes, 10) : minutes;
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
     return `${hours}h ${mins}m`;
   };
 
