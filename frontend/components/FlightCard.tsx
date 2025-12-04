@@ -81,7 +81,7 @@ export default function FlightCard({ flight, index, isBestPrice }: FlightCardPro
         <div className="text-center">
           <p className="text-xs font-semibold text-premium-mist/60 mb-2">FLIGHT</p>
           <div className="space-y-1">
-            <p className="text-sm font-bold text-gold-400">{segment.carrier_name || segment.carrier}</p>
+            <p className="text-sm font-bold text-gold-400">{segment.carrier}</p>
             <p className="text-sm text-premium-mist">{segment.carrier}{segment.flight_number}</p>
             <p className="text-xs text-premium-mist/60">{segment.aircraft || 'Aircraft N/A'}</p>
           </div>
