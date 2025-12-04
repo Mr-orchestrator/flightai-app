@@ -1,0 +1,44 @@
+═══════════════════════════════════════════════════
+  RENDER DEPLOYMENT CHECKLIST
+═══════════════════════════════════════════════════
+
+BEFORE YOU START:
+□ Have your Gemini API key ready
+□ Have your Amadeus Client ID ready
+□ Have your Amadeus Client Secret ready
+
+FILES TO UPLOAD (if not using Git):
+□ api_server.py
+□ core.py
+□ iata_extractor.py
+□ amadeus_flights.py
+□ requirements.txt
+□ render.yaml (optional)
+
+RENDER CONFIGURATION:
+□ Name: flightai-backend
+□ Region: [Select closest]
+□ Runtime: Python 3
+□ Build: pip install -r requirements.txt
+□ Start: uvicorn api_server:app --host 0.0.0.0 --port $PORT
+□ Plan: Free
+
+ENVIRONMENT VARIABLES TO ADD:
+□ GOOGLE_API_KEY = [your_key]
+□ AMADEUS_CLIENT_ID = [your_id]
+□ AMADEUS_CLIENT_SECRET = [your_secret]
+
+AFTER DEPLOYMENT:
+□ Copy backend URL
+□ Test: https://your-backend.onrender.com
+□ Test: https://your-backend.onrender.com/airports
+□ Update frontend with backend URL
+□ Redeploy frontend
+□ Update CORS in api_server.py with Vercel URL
+□ Test full application
+
+YOUR URLS:
+Backend: _________________________________
+Frontend: _________________________________
+
+═══════════════════════════════════════════════════
