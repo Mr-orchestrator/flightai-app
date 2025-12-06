@@ -21,7 +21,7 @@ interface FlightRoute {
 export default function AnimatedBackground() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const routesRef = useRef<FlightRoute[]>([]);
-  const animationFrameRef = useRef<number>();
+  const animationFrameRef = useRef<number | undefined>(undefined);
   const timeRef = useRef<number>(0);
 
   useEffect(() => {
