@@ -1,6 +1,6 @@
 """
 FlightAI Database Models + Async Connection
-PostgreSQL with SQLAlchemy async ORM
+SQLite (aiosqlite) for zero-setup dev, can swap to PostgreSQL via DATABASE_URL
 """
 
 import os
@@ -8,19 +8,31 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import (
-    Column, String, Integer, DateTime, ForeignKey, Text, JSON, Boolean
+    Column, String, Integer, DateTime, ForeignKey, Text, JSON, Boolean, event
 )
-from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
+# Default to SQLite file in project root — zero config needed
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/flightai"
+    "sqlite+aiosqlite:///./flightai.db"
 )
 
-engine = create_async_engine(DATABASE_URL, echo=False)
+# If someone passes a postgres:// URL, convert to postgresql+asyncpg://
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+
+is_sqlite = DATABASE_URL.startswith("sqlite")
+
+engine = create_async_engine(
+    DATABASE_URL,
+    echo=False,
+    # SQLite needs check_same_thread=False for async
+    connect_args={"check_same_thread": False} if is_sqlite else {},
+)
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -31,7 +43,7 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     email = Column(String(255), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=False)
     name = Column(String(255), nullable=False)
@@ -46,7 +58,7 @@ class TravelHistory(Base):
     __tablename__ = "travel_history"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     origin_iata = Column(String(3), nullable=False)
     destination_iata = Column(String(3), nullable=False)
     destination_city = Column(String(255), nullable=True)
@@ -61,7 +73,7 @@ class UserPreferences(Base):
     __tablename__ = "user_preferences"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False)
+    user_id = Column(String(36), ForeignKey("users.id"), unique=True, nullable=False)
     interests = Column(JSON, default=list)
     budget_level = Column(String(20), default="moderate")
     travel_style = Column(String(20), default="mixed")

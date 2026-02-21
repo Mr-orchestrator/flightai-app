@@ -170,7 +170,7 @@ async def signup(request: SignupRequest):
 
         # Create user
         user = User(
-            id=uuid.uuid4(),
+            id=str(uuid.uuid4()),
             email=request.email,
             hashed_password=hash_password(request.password),
             name=request.name,
@@ -215,7 +215,7 @@ async def get_me(current_user: dict = Depends(get_current_user)):
     """Get current user profile"""
     async with async_session() as session:
         result = await session.execute(
-            select(User).where(User.id == uuid.UUID(current_user["user_id"]))
+            select(User).where(User.id == current_user["user_id"])
         )
         user = result.scalar_one_or_none()
         if not user:
@@ -238,7 +238,7 @@ async def get_travel_history(current_user: dict = Depends(get_current_user)):
     async with async_session() as session:
         result = await session.execute(
             select(TravelHistory)
-            .where(TravelHistory.user_id == uuid.UUID(current_user["user_id"]))
+            .where(TravelHistory.user_id == current_user["user_id"])
             .order_by(TravelHistory.searched_at.desc())
             .limit(50)
         )
@@ -271,7 +271,7 @@ async def get_auto_packages(
         async with async_session() as session:
             result = await session.execute(
                 select(TravelHistory)
-                .where(TravelHistory.user_id == uuid.UUID(current_user["user_id"]))
+                .where(TravelHistory.user_id == current_user["user_id"])
                 .order_by(TravelHistory.searched_at.desc())
                 .limit(10)
             )
@@ -280,13 +280,13 @@ async def get_auto_packages(
             # Fetch user preferences
             pref_result = await session.execute(
                 select(UserPreferences)
-                .where(UserPreferences.user_id == uuid.UUID(current_user["user_id"]))
+                .where(UserPreferences.user_id == current_user["user_id"])
             )
             user_prefs = pref_result.scalar_one_or_none()
 
             # Get user's home airport
             user_result = await session.execute(
-                select(User).where(User.id == uuid.UUID(current_user["user_id"]))
+                select(User).where(User.id == current_user["user_id"])
             )
             user = user_result.scalar_one_or_none()
 
@@ -326,7 +326,7 @@ async def get_auto_packages(
             async with async_session() as session:
                 pref_result = await session.execute(
                     select(UserPreferences)
-                    .where(UserPreferences.user_id == uuid.UUID(current_user["user_id"]))
+                    .where(UserPreferences.user_id == current_user["user_id"])
                 )
                 existing_prefs = pref_result.scalar_one_or_none()
 
@@ -336,7 +336,7 @@ async def get_auto_packages(
                     existing_prefs.travel_style = request.preferences.travel_style or existing_prefs.travel_style
                 else:
                     new_prefs = UserPreferences(
-                        user_id=uuid.UUID(current_user["user_id"]),
+                        user_id=current_user["user_id"],
                         interests=request.preferences.interests,
                         budget_level=request.preferences.budget_level or "moderate",
                         travel_style=request.preferences.travel_style or "mixed",
@@ -520,7 +520,7 @@ async def search_flights(request: FlightSearchRequest, http_request: Request):
             try:
                 async with async_session() as session:
                     history_entry = TravelHistory(
-                        user_id=uuid.UUID(user["user_id"]),
+                        user_id=user["user_id"],
                         origin_iata=request.origin,
                         destination_iata=request.destination,
                         destination_city=None,

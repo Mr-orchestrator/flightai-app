@@ -201,6 +201,13 @@ def _call_gemini_fallback(system_prompt: str, user_prompt: str) -> tuple[Optiona
     if not GENAI_AVAILABLE:
         return None, None, [("genai_missing", "google.generativeai not available")]
 
+    # Configure Gemini API key (same pattern as core.py)
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return None, None, [("gemini_no_key", "GOOGLE_API_KEY not set")]
+
+    genai.configure(api_key=api_key)
+
     errors = []
     for model_name in GEMINI_MODEL_CANDIDATES:
         try:

@@ -10,6 +10,7 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
   workers: 1,
+  timeout: 120000, // 2 min per test (LLM calls can be slow)
   reporter: [['html', { outputFolder: 'playwright-report' }], ['list']],
 
   use: {
