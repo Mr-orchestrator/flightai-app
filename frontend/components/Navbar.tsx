@@ -1,15 +1,21 @@
 /**
  * Premium Navbar Component
- * Lufthansa-inspired navigation with glow intro
+ * Lufthansa-inspired navigation with glow intro + auth UI
  */
 
 'use client';
 
 import { motion } from 'framer-motion';
 import { navbarSlide } from '@/lib/motion';
-import { FiUser, FiPhone, FiMap } from 'react-icons/fi';
+import { FiUser, FiPhone, FiMap, FiPackage, FiLogOut } from 'react-icons/fi';
 
-export default function Navbar() {
+interface NavbarProps {
+  isAuthenticated?: boolean;
+  userName?: string | null;
+  onLogout?: () => void;
+}
+
+export default function Navbar({ isAuthenticated = false, userName, onLogout }: NavbarProps) {
   return (
     <motion.nav
       className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-b from-premium-bg/95 to-transparent backdrop-blur-xl border-b border-premium-border/50"
@@ -20,7 +26,8 @@ export default function Navbar() {
       <div className="max-w-7xl mx-auto px-6 py-4">
         <div className="flex items-center justify-between">
           {/* Logo Section */}
-          <motion.div
+          <motion.a
+            href="/"
             className="flex items-center gap-4"
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -33,7 +40,7 @@ export default function Navbar() {
               transition={{ type: 'spring', stiffness: 400, damping: 10 }}
             >
               <span className="text-3xl">✈️</span>
-              
+
               {/* Animated glow ring */}
               <motion.div
                 className="absolute inset-0 rounded-2xl border-2 border-gold-500"
@@ -68,27 +75,47 @@ export default function Navbar() {
                 Premium Booking
               </motion.p>
             </div>
-          </motion.div>
+          </motion.a>
 
           {/* Navigation Links */}
           <motion.div
-            className="hidden md:flex items-center gap-8"
+            className="hidden md:flex items-center gap-6"
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.8, delay: 0.3 }}
           >
-            <NavLink icon={<FiMap />} label="My Trips" />
-            <NavLink icon={<FiPhone />} label="Support" />
-            
-            {/* Profile Button with Premium Styling */}
-            <motion.button
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-gold-500/20 to-gold-600/20 border border-gold-500/30 text-gold-400 font-semibold hover:shadow-glow transition-all duration-300"
-              whileHover={{ scale: 1.05, y: -2 }}
-              whileTap={{ scale: 0.95 }}
-            >
-              <FiUser className="w-4 h-4" />
-              <span>Profile</span>
-            </motion.button>
+            <NavLink icon={<FiMap />} label="My Trips" href="/" />
+            <NavLink icon={<FiPackage />} label="Packages" href="/#packages" />
+            <NavLink icon={<FiPhone />} label="Support" href="#" />
+
+            {isAuthenticated ? (
+              <div className="flex items-center gap-3">
+                <div className="text-sm text-premium-mist/70">
+                  Hi, <span className="text-gold-400 font-semibold">{userName || 'Traveler'}</span>
+                </div>
+                <motion.button
+                  onClick={onLogout}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-premium-surface/50 border border-premium-border text-premium-mist/70 font-medium hover:text-red-400 hover:border-red-500/30 transition-all duration-300"
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <FiLogOut className="w-4 h-4" />
+                  <span>Logout</span>
+                </motion.button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3">
+                <motion.a
+                  href="/auth"
+                  className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-gold-500/20 to-gold-600/20 border border-gold-500/30 text-gold-400 font-semibold hover:shadow-glow transition-all duration-300"
+                  whileHover={{ scale: 1.05, y: -2 }}
+                  whileTap={{ scale: 0.95 }}
+                >
+                  <FiUser className="w-4 h-4" />
+                  <span>Sign In</span>
+                </motion.a>
+              </div>
+            )}
           </motion.div>
         </div>
       </div>
@@ -108,18 +135,19 @@ export default function Navbar() {
 interface NavLinkProps {
   icon: React.ReactNode;
   label: string;
+  href: string;
 }
 
-function NavLink({ icon, label }: NavLinkProps) {
+function NavLink({ icon, label, href }: NavLinkProps) {
   return (
     <motion.a
-      href="#"
+      href={href}
       className="group relative flex items-center gap-2 text-premium-mist/70 hover:text-gold-400 transition-colors duration-300 py-2"
       whileHover={{ y: -2 }}
     >
       <span className="text-lg">{icon}</span>
       <span className="font-medium">{label}</span>
-      
+
       {/* Underline animation */}
       <motion.div
         className="absolute bottom-0 left-0 right-0 h-0.5 bg-gradient-to-r from-gold-500 to-gold-600"

@@ -6,8 +6,10 @@ import AnimatedBackground from '@/components/AnimatedBackground';
 import Navbar from '@/components/Navbar';
 import SearchCard from '@/components/SearchCard';
 import FlightCard from '@/components/FlightCard';
+import AutoPackageSection from '@/components/AutoPackageSection';
 import { getAirports, extractTrip, searchFlights } from '@/lib/api';
 import type { Airport, TripExtractionResponse, FlightSearchResponse } from '@/lib/api';
+import { isAuthenticated, getCurrentUser, logout as doLogout } from '@/lib/auth';
 
 export default function Home() {
   const [airports, setAirports] = useState<Airport[]>([]);
@@ -15,6 +17,10 @@ export default function Home() {
   const [tripData, setTripData] = useState<TripExtractionResponse | null>(null);
   const [flightsData, setFlightsData] = useState<FlightSearchResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Auth state
+  const [isAuthed, setIsAuthed] = useState(false);
+  const [userName, setUserName] = useState<string | null>(null);
 
   useEffect(() => {
     // Load airports on mount
@@ -24,7 +30,21 @@ export default function Home() {
         console.error('Failed to load airports:', err);
         setError('Failed to load airports. Please check if the backend API is running.');
       });
+
+    // Check auth state
+    const authed = isAuthenticated();
+    setIsAuthed(authed);
+    if (authed) {
+      const user = getCurrentUser();
+      setUserName(user?.name || null);
+    }
   }, []);
+
+  const handleLogout = () => {
+    doLogout();
+    setIsAuthed(false);
+    setUserName(null);
+  };
 
   const handleSearch = async (origin: string, query: string) => {
     setIsLoading(true);
@@ -71,8 +91,12 @@ export default function Home() {
   return (
     <main className="min-h-screen">
       <AnimatedBackground />
-      <Navbar />
-      
+      <Navbar
+        isAuthenticated={isAuthed}
+        userName={userName}
+        onLogout={handleLogout}
+      />
+
       {/* Hero Section */}
       <section className="relative min-h-screen flex items-center justify-center px-6 pt-32">
         <div className="max-w-7xl mx-auto w-full">
@@ -90,7 +114,7 @@ export default function Home() {
             >
               <div className="px-6 py-3 rounded-full bg-gradient-gold/10 border border-gold-500/30">
                 <span className="text-gold-400 font-bold text-sm tracking-wider">
-                  ✨ AI-POWERED LUXURY BOOKING
+                  AI-POWERED LUXURY BOOKING
                 </span>
               </div>
             </motion.div>
@@ -106,7 +130,7 @@ export default function Home() {
             </p>
           </motion.div>
 
-          <SearchCard 
+          <SearchCard
             airports={airports}
             onSearch={handleSearch}
             isLoading={isLoading}
@@ -119,9 +143,7 @@ export default function Home() {
               animate={{ opacity: 1, y: 0 }}
               className="mt-8 max-w-4xl mx-auto p-6 bg-red-500/10 border border-red-500/30 rounded-2xl backdrop-blur-xl"
             >
-              <p className="text-red-400 text-center">
-                ⚠️ {error}
-              </p>
+              <p className="text-red-400 text-center">{error}</p>
             </motion.div>
           )}
 
@@ -135,7 +157,7 @@ export default function Home() {
             >
               <div className="bg-gradient-glass backdrop-blur-2xl rounded-luxury border border-gold-500/20 shadow-luxury p-8">
                 <h2 className="text-3xl font-display font-bold text-white mb-6">
-                  ✈️ Your Journey
+                  Your Journey
                 </h2>
 
                 {/* Route Display */}
@@ -150,9 +172,9 @@ export default function Home() {
                     <motion.div
                       animate={{ x: [0, 10, 0] }}
                       transition={{ duration: 2, repeat: Infinity, ease: 'easeInOut' }}
-                      className="text-6xl"
+                      className="text-6xl text-gold-400"
                     >
-                      →
+                      &rarr;
                     </motion.div>
                   </div>
 
@@ -169,14 +191,12 @@ export default function Home() {
                     <div className="text-xs text-premium-mist/60 uppercase tracking-wider mb-1">Duration</div>
                     <div className="text-2xl font-bold text-white">{tripData.duration_days} days</div>
                   </div>
-
                   <div className="p-4 bg-premium-surface/30 rounded-xl border border-premium-border/50">
                     <div className="text-xs text-premium-mist/60 uppercase tracking-wider mb-1">Departure</div>
                     <div className="text-2xl font-bold text-white">
                       {new Date(tripData.departure_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
                     </div>
                   </div>
-
                   <div className="p-4 bg-premium-surface/30 rounded-xl border border-premium-border/50">
                     <div className="text-xs text-premium-mist/60 uppercase tracking-wider mb-1">Return</div>
                     <div className="text-2xl font-bold text-white">
@@ -193,13 +213,13 @@ export default function Home() {
                   className="mt-6 inline-block"
                 >
                   <div className={`px-4 py-2 rounded-full font-bold text-sm ${
-                    tripData.iata_confidence === 'high' 
+                    tripData.iata_confidence === 'high'
                       ? 'bg-green-500/20 border border-green-500/50 text-green-400'
                       : tripData.iata_confidence === 'medium'
                       ? 'bg-yellow-500/20 border border-yellow-500/50 text-yellow-400'
                       : 'bg-gray-500/20 border border-gray-500/50 text-gray-400'
                   }`}>
-                    {tripData.iata_confidence === 'high' ? '✓' : tripData.iata_confidence === 'medium' ? '~' : '?'} 
+                    {tripData.iata_confidence === 'high' ? '✓' : tripData.iata_confidence === 'medium' ? '~' : '?'}
                     {' '}{tripData.iata_confidence.toUpperCase()} CONFIDENCE
                   </div>
                 </motion.div>
@@ -216,17 +236,11 @@ export default function Home() {
               className="mt-12 max-w-6xl mx-auto"
             >
               <h2 className="text-4xl font-display font-bold text-white mb-8 text-center">
-                ✈️ Available Flights
+                Available Flights
               </h2>
-
               <div className="space-y-4">
                 {flightsData.flights.map((flight, index) => (
-                  <FlightCard
-                    key={index}
-                    flight={flight}
-                    index={index}
-                    isBestPrice={index === 0}
-                  />
+                  <FlightCard key={index} flight={flight} index={index} isBestPrice={index === 0} />
                 ))}
               </div>
             </motion.div>
@@ -244,6 +258,15 @@ export default function Home() {
               </p>
             </motion.div>
           )}
+
+          {/* AI Auto Package Section */}
+          <div id="packages">
+            <AutoPackageSection
+              originIata={tripData?.origin_iata || ''}
+              airports={airports}
+              isAuthenticated={isAuthed}
+            />
+          </div>
         </div>
       </section>
     </main>

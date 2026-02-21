@@ -4,15 +4,25 @@
  */
 
 import axios from 'axios';
+import Cookies from 'js-cookie';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
 
 const api = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000,
+  timeout: 60000,
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// Auto-attach JWT token to all requests
+api.interceptors.request.use((config) => {
+  const token = Cookies.get('flightai_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
 });
 
 // ==================== TYPE DEFINITIONS ====================
@@ -195,6 +205,101 @@ export const healthCheck = async (): Promise<{ status: string; amadeus_configure
   } catch (error) {
     console.error('Error checking health:', error);
     throw new Error('API is unavailable');
+  }
+};
+
+// ==================== AUTO PACKAGE TYPES ====================
+
+export interface ActivityItem {
+  time: string;
+  activity: string;
+  estimated_cost_inr: number;
+}
+
+export interface DayItinerary {
+  day: number;
+  title: string;
+  activities: ActivityItem[];
+}
+
+export interface HotelInfo {
+  name: string;
+  star_rating: number;
+  price_per_night_inr: number;
+  area: string;
+}
+
+export interface FlightEstimate {
+  travel_class: string;
+  estimated_price_inr: number;
+}
+
+export interface TravelPackage {
+  tier: 'budget' | 'standard' | 'premium';
+  name: string;
+  tagline: string;
+  destination_city: string;
+  destination_iata: string;
+  duration_days: number;
+  estimated_total_inr: number;
+  hotel: HotelInfo;
+  flights: FlightEstimate;
+  daily_itinerary: DayItinerary[];
+  inclusions: string[];
+  highlights: string[];
+}
+
+export interface AutoPackageRequest {
+  destination?: string;
+  duration_days?: number;
+  budget_inr?: number;
+  preferences?: {
+    interests?: string[];
+    budget_level?: string;
+    travel_style?: string;
+  };
+}
+
+export interface AutoPackageResponse {
+  success: boolean;
+  packages: TravelPackage[];
+  personalization_note: string;
+  model_used: string | null;
+  used_fallback: boolean;
+  error: string | null;
+}
+
+export interface TravelHistoryItem {
+  id: number;
+  origin_iata: string;
+  destination_iata: string;
+  destination_city: string | null;
+  duration_days: number | null;
+  query_text: string | null;
+  searched_at: string;
+}
+
+// ==================== PACKAGE API FUNCTIONS ====================
+
+export const fetchAutoPackages = async (
+  request: AutoPackageRequest
+): Promise<AutoPackageResponse> => {
+  try {
+    const response = await api.post<AutoPackageResponse>('/auto-packages', request);
+    return response.data;
+  } catch (error) {
+    console.error('Error generating packages:', error);
+    throw new Error('Failed to generate travel packages');
+  }
+};
+
+export const getTravelHistory = async (): Promise<TravelHistoryItem[]> => {
+  try {
+    const response = await api.get<TravelHistoryItem[]>('/travel-history');
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching travel history:', error);
+    throw new Error('Failed to fetch travel history');
   }
 };
 
