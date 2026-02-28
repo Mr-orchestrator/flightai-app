@@ -1,15 +1,19 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { staggerContainer, staggerItem } from '@/lib/motion';
 import {
   FiPackage, FiStar, FiMapPin, FiCalendar,
   FiChevronDown, FiChevronUp, FiSun, FiCamera,
   FiHeart, FiDollarSign, FiClock, FiCheck,
+  FiSearch, FiUsers, FiHome, FiZap, FiDatabase,
+  FiX,
 } from 'react-icons/fi';
-import { fetchAutoPackages } from '@/lib/api';
-import type { TravelPackage } from '@/lib/api';
+import {
+  fetchAutoPackages, getOnboardingStatus, savePreferences,
+} from '@/lib/api';
+import type { TravelPackage, AutoPackageResponse } from '@/lib/api';
 
 interface AutoPackageSectionProps {
   originIata: string;
@@ -24,6 +28,21 @@ const INTEREST_OPTIONS = [
   { id: 'food', label: 'Food & Dining', icon: <FiHeart className="w-4 h-4" /> },
   { id: 'shopping', label: 'Shopping', icon: <FiPackage className="w-4 h-4" /> },
   { id: 'nature', label: 'Nature', icon: <FiStar className="w-4 h-4" /> },
+  { id: 'nightlife', label: 'Nightlife', icon: <FiZap className="w-4 h-4" /> },
+  { id: 'history', label: 'History', icon: <FiSearch className="w-4 h-4" /> },
+];
+
+const COMPANION_OPTIONS = [
+  { id: 'solo', label: 'Solo' },
+  { id: 'couple', label: 'Couple' },
+  { id: 'family', label: 'Family' },
+  { id: 'friends', label: 'Friends' },
+];
+
+const ACCOMMODATION_OPTIONS = [
+  { id: 'hotel', label: 'Hotel' },
+  { id: 'resort', label: 'Resort' },
+  { id: 'hostel', label: 'Hostel' },
 ];
 
 const TIER_STYLES: Record<string, { border: string; badge: string; glow: string; accent: string }> = {
@@ -51,6 +70,24 @@ function formatINR(amount: number): string {
   return new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(amount);
 }
 
+function DataSourceBadge({ source }: { source?: string }) {
+  if (source === 'amadeus') {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
+        <FiDatabase className="w-2.5 h-2.5" /> LIVE
+      </span>
+    );
+  }
+  if (source === 'estimated' || source === 'suggested') {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">
+        AI EST.
+      </span>
+    );
+  }
+  return null;
+}
+
 export default function AutoPackageSection({ originIata, airports, isAuthenticated: isAuth }: AutoPackageSectionProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [packages, setPackages] = useState<TravelPackage[]>([]);
@@ -63,6 +100,33 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [expandedTier, setExpandedTier] = useState<string | null>(null);
   const [activeTierFilter, setActiveTierFilter] = useState<string | null>(null);
   const [modelUsed, setModelUsed] = useState<string | null>(null);
+  const [dataQuality, setDataQuality] = useState<string | null>(null);
+  const [amadeusStats, setAmadeusStats] = useState<{ flights_found: number; hotels_found: number; activities_found: number } | null>(null);
+
+  // Natural language input
+  const [nlQuery, setNlQuery] = useState('');
+  const [useNL, setUseNL] = useState(true);
+
+  // Onboarding
+  const [showOnboarding, setShowOnboarding] = useState(false);
+  const [onboardingChecked, setOnboardingChecked] = useState(false);
+  const [companions, setCompanions] = useState('');
+  const [accommodation, setAccommodation] = useState('hotel');
+  const [dreamDestinations, setDreamDestinations] = useState('');
+
+  // Check onboarding status on mount
+  useEffect(() => {
+    if (isAuth && !onboardingChecked) {
+      getOnboardingStatus()
+        .then((status) => {
+          if (!status.onboarding_completed) {
+            setShowOnboarding(true);
+          }
+          setOnboardingChecked(true);
+        })
+        .catch(() => setOnboardingChecked(true));
+    }
+  }, [isAuth, onboardingChecked]);
 
   const toggleInterest = (id: string) => {
     setSelectedInterests((prev) =>
@@ -70,16 +134,36 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
     );
   };
 
+  const handleSaveOnboarding = async () => {
+    try {
+      await savePreferences({
+        interests: selectedInterests,
+        budget_level: budgetLevel,
+        travel_style: 'mixed',
+        preferred_destinations: dreamDestinations ? dreamDestinations.split(',').map(d => d.trim()) : [],
+        travel_companions: companions || undefined,
+        accommodation_preference: accommodation,
+      });
+      setShowOnboarding(false);
+    } catch {
+      // Non-critical, just close
+      setShowOnboarding(false);
+    }
+  };
+
   const handleGenerate = async () => {
     setIsLoading(true);
     setError(null);
     setPackages([]);
     setNote('');
+    setDataQuality(null);
+    setAmadeusStats(null);
 
     try {
-      const result = await fetchAutoPackages({
+      const result: AutoPackageResponse = await fetchAutoPackages({
         destination: destination || undefined,
         duration_days: duration,
+        natural_language_query: useNL && nlQuery ? nlQuery : undefined,
         preferences: {
           interests: selectedInterests.length > 0 ? selectedInterests : undefined,
           budget_level: budgetLevel,
@@ -91,6 +175,8 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
         setPackages(result.packages);
         setNote(result.personalization_note);
         setModelUsed(result.model_used);
+        setDataQuality(result.data_quality);
+        setAmadeusStats(result.amadeus_data || null);
       } else {
         setError(result.error || 'No packages generated');
       }
@@ -120,8 +206,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
             AI Travel Packages
           </h3>
           <p className="text-premium-mist/60 mb-6 max-w-md mx-auto">
-            Sign in to unlock personalized travel packages powered by AI.
-            We&apos;ll learn from your searches to create perfect itineraries.
+            Sign in to unlock personalized travel packages powered by AI with real-time flight and hotel data.
           </p>
           <a
             href="/auth"
@@ -141,6 +226,126 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
       transition={{ duration: 0.8, delay: 0.3 }}
       className="mt-16 max-w-7xl mx-auto"
     >
+      {/* Onboarding Modal */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-navy-900 border border-gold-500/20 rounded-2xl shadow-2xl max-w-lg w-full p-8 relative"
+            >
+              <button
+                onClick={() => setShowOnboarding(false)}
+                className="absolute top-4 right-4 text-premium-mist/40 hover:text-white"
+              >
+                <FiX className="w-5 h-5" />
+              </button>
+
+              <div className="text-center mb-6">
+                <FiUsers className="w-10 h-10 text-gold-400 mx-auto mb-3" />
+                <h3 className="text-xl font-display font-bold text-white">Tell us about yourself</h3>
+                <p className="text-premium-mist/60 text-sm mt-1">Help us personalize your travel packages</p>
+              </div>
+
+              {/* Interests */}
+              <div className="mb-5">
+                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">What interests you?</label>
+                <div className="flex flex-wrap gap-2">
+                  {INTEREST_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => toggleInterest(opt.id)}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+                        selectedInterests.includes(opt.id)
+                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                      }`}
+                    >
+                      {opt.icon} {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Travel companions */}
+              <div className="mb-5">
+                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                  <FiUsers className="inline mr-1" /> Who do you travel with?
+                </label>
+                <div className="flex gap-2">
+                  {COMPANION_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setCompanions(opt.id)}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        companions === opt.id
+                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Accommodation */}
+              <div className="mb-5">
+                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                  <FiHome className="inline mr-1" /> Preferred accommodation
+                </label>
+                <div className="flex gap-2">
+                  {ACCOMMODATION_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setAccommodation(opt.id)}
+                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                        accommodation === opt.id
+                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Dream destinations */}
+              <div className="mb-6">
+                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                  <FiMapPin className="inline mr-1" /> Dream destinations (comma-separated)
+                </label>
+                <input
+                  type="text"
+                  value={dreamDestinations}
+                  onChange={(e) => setDreamDestinations(e.target.value)}
+                  placeholder="e.g. Paris, Tokyo, Bali"
+                  className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                />
+              </div>
+
+              <button
+                onClick={handleSaveOnboarding}
+                className="w-full px-6 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 hover:scale-[1.02] transition-transform"
+              >
+                Save & Continue
+              </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="bg-gradient-glass backdrop-blur-2xl rounded-luxury border border-gold-500/20 shadow-luxury overflow-hidden">
         {/* Gold top border */}
         <motion.div
@@ -161,12 +366,47 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                 AI Travel Packages
               </h2>
               <p className="text-premium-mist/60 mt-1">
-                Personalized itineraries crafted from your travel history
+                Real-time flights & hotels powered by Amadeus + AI curation
               </p>
             </div>
           </div>
 
-          {/* Preferences */}
+          {/* Natural Language Input */}
+          <div className="mb-6">
+            <div className="flex items-center gap-2 mb-3">
+              <button
+                onClick={() => setUseNL(true)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  useNL ? 'bg-gold-500/20 text-gold-400 border border-gold-500/30' : 'text-premium-mist/50 hover:text-white'
+                }`}
+              >
+                Describe your trip
+              </button>
+              <button
+                onClick={() => setUseNL(false)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                  !useNL ? 'bg-gold-500/20 text-gold-400 border border-gold-500/30' : 'text-premium-mist/50 hover:text-white'
+                }`}
+              >
+                Use form
+              </button>
+            </div>
+
+            {useNL && (
+              <div className="relative">
+                <FiSearch className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gold-400" />
+                <input
+                  type="text"
+                  value={nlQuery}
+                  onChange={(e) => setNlQuery(e.target.value)}
+                  placeholder="e.g. I want a relaxing beach vacation in Goa for a week under 50k..."
+                  className="w-full pl-12 pr-4 py-4 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium placeholder-premium-mist/40 focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none text-lg"
+                />
+              </div>
+            )}
+          </div>
+
+          {/* Structured Form (shown when "Use form" is selected or alongside NL) */}
           <div className="space-y-6 mb-8">
             {/* Interests */}
             <div>
@@ -195,49 +435,51 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
             </div>
 
             {/* Destination + Duration + Budget row */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
-                  <FiMapPin className="inline mr-1" /> Destination (Optional)
-                </label>
-                <input
-                  type="text"
-                  value={destination}
-                  onChange={(e) => setDestination(e.target.value)}
-                  placeholder="e.g. Dubai, Paris, Tokyo"
-                  className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium placeholder-premium-mist/40 focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none"
-                />
-              </div>
+            {!useNL && (
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
+                    <FiMapPin className="inline mr-1" /> Destination (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={destination}
+                    onChange={(e) => setDestination(e.target.value)}
+                    placeholder="e.g. Dubai, Paris, Tokyo"
+                    className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium placeholder-premium-mist/40 focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
-                  <FiCalendar className="inline mr-1" /> Duration (days)
-                </label>
-                <input
-                  type="number"
-                  min={2}
-                  max={30}
-                  value={duration}
-                  onChange={(e) => setDuration(parseInt(e.target.value) || 7)}
-                  className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none"
-                />
-              </div>
+                <div>
+                  <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
+                    <FiCalendar className="inline mr-1" /> Duration (days)
+                  </label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={30}
+                    value={duration}
+                    onChange={(e) => setDuration(parseInt(e.target.value) || 7)}
+                    className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none"
+                  />
+                </div>
 
-              <div>
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
-                  <FiDollarSign className="inline mr-1" /> Budget Level
-                </label>
-                <select
-                  value={budgetLevel}
-                  onChange={(e) => setBudgetLevel(e.target.value)}
-                  className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none appearance-none cursor-pointer"
-                >
-                  <option value="budget">Budget</option>
-                  <option value="moderate">Moderate</option>
-                  <option value="luxury">Luxury</option>
-                </select>
+                <div>
+                  <label className="block text-sm font-semibold text-premium-mist/80 mb-2 uppercase tracking-wide">
+                    <FiDollarSign className="inline mr-1" /> Budget Level
+                  </label>
+                  <select
+                    value={budgetLevel}
+                    onChange={(e) => setBudgetLevel(e.target.value)}
+                    className="w-full px-4 py-3 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none appearance-none cursor-pointer"
+                  >
+                    <option value="budget">Budget</option>
+                    <option value="moderate">Moderate</option>
+                    <option value="luxury">Luxury</option>
+                  </select>
+                </div>
               </div>
-            </div>
+            )}
           </div>
 
           {/* Generate button */}
@@ -261,12 +503,12 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                     animate={{ rotate: 360 }}
                     transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
                   />
-                  Generating packages with AI...
+                  Fetching real-time data & generating packages...
                 </>
               ) : (
                 <>
-                  <FiPackage className="w-5 h-5" />
-                  Generate AI Packages
+                  <FiZap className="w-5 h-5" />
+                  Generate Real-Time AI Packages
                 </>
               )}
             </span>
@@ -285,6 +527,31 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Data quality indicator */}
+          {dataQuality && amadeusStats && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="mt-6 flex flex-wrap items-center gap-3"
+            >
+              <div className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-bold border ${
+                dataQuality === 'full_realtime'
+                  ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                  : dataQuality === 'partial_realtime'
+                  ? 'bg-amber-500/10 text-amber-400 border-amber-500/30'
+                  : 'bg-gray-500/10 text-gray-400 border-gray-500/30'
+              }`}>
+                <FiDatabase className="w-3.5 h-3.5" />
+                {dataQuality === 'full_realtime' ? 'Full Real-Time Data' :
+                 dataQuality === 'partial_realtime' ? 'Partial Real-Time Data' :
+                 'Estimated Data'}
+              </div>
+              <span className="text-xs text-premium-mist/40">
+                {amadeusStats.flights_found} flights &middot; {amadeusStats.hotels_found} hotels &middot; {amadeusStats.activities_found} activities from Amadeus
+              </span>
+            </motion.div>
+          )}
 
           {/* Results */}
           {packages.length > 0 && (
@@ -323,9 +590,10 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                 initial="hidden"
                 animate="visible"
               >
-                {filteredPackages.map((pkg, index) => {
+                {filteredPackages.map((pkg) => {
                   const styles = TIER_STYLES[pkg.tier] || TIER_STYLES.standard;
                   const isExpanded = expandedTier === pkg.tier;
+                  const flightPrice = pkg.flights.price_inr || pkg.flights.estimated_price_inr || 0;
 
                   return (
                     <motion.div
@@ -335,8 +603,10 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                     >
                       {/* Tier badge */}
                       <div className="p-6">
-                        <div className={`inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${styles.badge} mb-4`}>
-                          {pkg.tier}
+                        <div className="flex items-center justify-between mb-4">
+                          <div className={`inline-block px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${styles.badge}`}>
+                            {pkg.tier}
+                          </div>
                         </div>
 
                         <h3 className="text-xl font-display font-bold text-white mb-1">
@@ -356,30 +626,39 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                           </div>
                         </div>
 
-                        {/* Hotel */}
+                        {/* Flight info */}
                         <div className="p-3 bg-premium-surface/40 rounded-xl mb-3">
                           <div className="flex items-center justify-between mb-1">
-                            <span className="text-sm font-semibold text-white">{pkg.hotel.name}</span>
-                            <div className="flex">
-                              {Array.from({ length: pkg.hotel.star_rating }).map((_, i) => (
-                                <FiStar key={i} className="w-3 h-3 text-gold-400 fill-gold-400" />
-                              ))}
-                            </div>
+                            <span className="text-sm font-semibold text-white">
+                              {pkg.flights.airline_name || pkg.flights.travel_class.replace('_', ' ')}
+                            </span>
+                            <DataSourceBadge source={pkg.flights.data_source} />
                           </div>
-                          <div className="text-xs text-premium-mist/50">
-                            {pkg.hotel.area} &middot; INR {formatINR(pkg.hotel.price_per_night_inr)}/night
+                          <div className="flex items-center justify-between text-xs text-premium-mist/50">
+                            <span>
+                              {pkg.flights.flight_number && `${pkg.flights.flight_number} · `}
+                              {pkg.flights.travel_class.replace('_', ' ')}
+                              {pkg.flights.stops !== undefined && ` · ${pkg.flights.stops} stop${pkg.flights.stops !== 1 ? 's' : ''}`}
+                            </span>
+                            <span>~INR {formatINR(flightPrice)}</span>
                           </div>
                         </div>
 
-                        {/* Flight class */}
+                        {/* Hotel info */}
                         <div className="p-3 bg-premium-surface/40 rounded-xl mb-3">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-sm font-semibold text-white">{pkg.hotel.name}</span>
+                            <DataSourceBadge source={pkg.hotel.data_source} />
+                          </div>
                           <div className="flex items-center justify-between">
-                            <span className="text-sm text-white">
-                              {pkg.flights.travel_class.replace('_', ' ')}
-                            </span>
-                            <span className="text-xs text-premium-mist/50">
-                              ~INR {formatINR(pkg.flights.estimated_price_inr)}
-                            </span>
+                            <div className="flex">
+                              {pkg.hotel.star_rating && Array.from({ length: pkg.hotel.star_rating }).map((_, i) => (
+                                <FiStar key={i} className="w-3 h-3 text-gold-400 fill-gold-400" />
+                              ))}
+                            </div>
+                            <div className="text-xs text-premium-mist/50">
+                              {pkg.hotel.area && `${pkg.hotel.area} · `}INR {formatINR(pkg.hotel.price_per_night_inr)}/night
+                            </div>
                           </div>
                         </div>
 
@@ -446,7 +725,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                                     {day.activities.map((act, ai) => (
                                       <div key={ai} className="flex items-start gap-2 text-xs">
                                         <FiClock className="w-3 h-3 text-gold-400 mt-0.5 flex-shrink-0" />
-                                        <div>
+                                        <div className="flex-1">
                                           <span className="text-premium-mist/50 capitalize">{act.time}: </span>
                                           <span className="text-premium-mist/80">{act.activity}</span>
                                           {act.estimated_cost_inr > 0 && (
@@ -455,6 +734,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                                             </span>
                                           )}
                                         </div>
+                                        <DataSourceBadge source={act.data_source} />
                                       </div>
                                     ))}
                                   </div>

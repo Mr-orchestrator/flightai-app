@@ -77,6 +77,10 @@ class UserPreferences(Base):
     interests = Column(JSON, default=list)
     budget_level = Column(String(20), default="moderate")
     travel_style = Column(String(20), default="mixed")
+    preferred_destinations = Column(JSON, default=list)
+    travel_companions = Column(String(20), nullable=True)  # solo/couple/family/friends
+    accommodation_preference = Column(String(20), default="hotel")  # hotel/resort/hostel
+    onboarding_completed = Column(Boolean, default=False)
 
     user = relationship("User", back_populates="preferences")
 

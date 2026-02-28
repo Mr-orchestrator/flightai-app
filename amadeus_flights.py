@@ -1,6 +1,6 @@
 """
-Amadeus Flight Search Integration
-Search real-time flights using origin/destination IATA codes
+Amadeus Travel API Integration
+Search real-time flights, hotels, and activities using Amadeus APIs
 """
 import os
 import requests
@@ -12,9 +12,83 @@ load_dotenv()
 AMADEUS_CLIENT_ID = os.getenv("AMADEUS_CLIENT_ID")
 AMADEUS_CLIENT_SECRET = os.getenv("AMADEUS_CLIENT_SECRET")
 
-# Amadeus API endpoints
-AMADEUS_AUTH_URL = "https://test.api.amadeus.com/v1/security/oauth2/token"
-AMADEUS_FLIGHT_SEARCH_URL = "https://test.api.amadeus.com/v2/shopping/flight-offers"
+# Amadeus API base + endpoints
+AMADEUS_BASE_URL = "https://test.api.amadeus.com"
+AMADEUS_AUTH_URL = f"{AMADEUS_BASE_URL}/v1/security/oauth2/token"
+AMADEUS_FLIGHT_SEARCH_URL = f"{AMADEUS_BASE_URL}/v2/shopping/flight-offers"
+AMADEUS_HOTEL_LIST_URL = f"{AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-city"
+AMADEUS_HOTEL_OFFERS_URL = f"{AMADEUS_BASE_URL}/v3/shopping/hotel-offers"
+AMADEUS_ACTIVITIES_URL = f"{AMADEUS_BASE_URL}/v1/shopping/activities"
+
+# IATA code to city coordinates mapping for hotel/activity searches
+CITY_COORDINATES = {
+    # India
+    "DEL": {"lat": 28.6139, "lon": 77.2090, "city": "New Delhi"},
+    "BOM": {"lat": 19.0760, "lon": 72.8777, "city": "Mumbai"},
+    "BLR": {"lat": 12.9716, "lon": 77.5946, "city": "Bangalore"},
+    "HYD": {"lat": 17.3850, "lon": 78.4867, "city": "Hyderabad"},
+    "MAA": {"lat": 13.0827, "lon": 80.2707, "city": "Chennai"},
+    "CCU": {"lat": 22.5726, "lon": 88.3639, "city": "Kolkata"},
+    "COK": {"lat": 9.9312, "lon": 76.2673, "city": "Kochi"},
+    "GOI": {"lat": 15.2993, "lon": 74.1240, "city": "Goa"},
+    "AMD": {"lat": 23.0225, "lon": 72.5714, "city": "Ahmedabad"},
+    "PNQ": {"lat": 18.5204, "lon": 73.8567, "city": "Pune"},
+    "JAI": {"lat": 26.9124, "lon": 75.7873, "city": "Jaipur"},
+    "TRV": {"lat": 8.5241, "lon": 76.9366, "city": "Thiruvananthapuram"},
+    "IXC": {"lat": 30.7333, "lon": 76.7794, "city": "Chandigarh"},
+    "VNS": {"lat": 25.3176, "lon": 82.9739, "city": "Varanasi"},
+    "SXR": {"lat": 34.0837, "lon": 74.7973, "city": "Srinagar"},
+    # Middle East
+    "DXB": {"lat": 25.2048, "lon": 55.2708, "city": "Dubai"},
+    "AUH": {"lat": 24.4539, "lon": 54.3773, "city": "Abu Dhabi"},
+    "DOH": {"lat": 25.2854, "lon": 51.5310, "city": "Doha"},
+    "BAH": {"lat": 26.2285, "lon": 50.5860, "city": "Bahrain"},
+    "MCT": {"lat": 23.5880, "lon": 58.3829, "city": "Muscat"},
+    "RUH": {"lat": 24.7136, "lon": 46.6753, "city": "Riyadh"},
+    "JED": {"lat": 21.4858, "lon": 39.1925, "city": "Jeddah"},
+    # Southeast Asia
+    "SIN": {"lat": 1.3521, "lon": 103.8198, "city": "Singapore"},
+    "BKK": {"lat": 13.7563, "lon": 100.5018, "city": "Bangkok"},
+    "KUL": {"lat": 3.1390, "lon": 101.6869, "city": "Kuala Lumpur"},
+    "HKG": {"lat": 22.3193, "lon": 114.1694, "city": "Hong Kong"},
+    "SGN": {"lat": 10.8231, "lon": 106.6297, "city": "Ho Chi Minh City"},
+    "HAN": {"lat": 21.0285, "lon": 105.8542, "city": "Hanoi"},
+    "MNL": {"lat": 14.5995, "lon": 120.9842, "city": "Manila"},
+    "DPS": {"lat": -8.3405, "lon": 115.1690, "city": "Bali"},
+    # East Asia
+    "NRT": {"lat": 35.6762, "lon": 139.6503, "city": "Tokyo"},
+    "ICN": {"lat": 37.5665, "lon": 126.9780, "city": "Seoul"},
+    "PEK": {"lat": 39.9042, "lon": 116.4074, "city": "Beijing"},
+    "PVG": {"lat": 31.2304, "lon": 121.4737, "city": "Shanghai"},
+    # Europe
+    "LHR": {"lat": 51.5074, "lon": -0.1278, "city": "London"},
+    "CDG": {"lat": 48.8566, "lon": 2.3522, "city": "Paris"},
+    "FRA": {"lat": 50.1109, "lon": 8.6821, "city": "Frankfurt"},
+    "AMS": {"lat": 52.3676, "lon": 4.9041, "city": "Amsterdam"},
+    "FCO": {"lat": 41.9028, "lon": 12.4964, "city": "Rome"},
+    "BCN": {"lat": 41.3874, "lon": 2.1686, "city": "Barcelona"},
+    "MAD": {"lat": 40.4168, "lon": -3.7038, "city": "Madrid"},
+    "IST": {"lat": 41.0082, "lon": 28.9784, "city": "Istanbul"},
+    "ZRH": {"lat": 47.3769, "lon": 8.5417, "city": "Zurich"},
+    "VIE": {"lat": 48.2082, "lon": 16.3738, "city": "Vienna"},
+    "MUC": {"lat": 48.1351, "lon": 11.5820, "city": "Munich"},
+    # Americas
+    "JFK": {"lat": 40.7128, "lon": -74.0060, "city": "New York"},
+    "LAX": {"lat": 34.0522, "lon": -118.2437, "city": "Los Angeles"},
+    "SFO": {"lat": 37.7749, "lon": -122.4194, "city": "San Francisco"},
+    "ORD": {"lat": 41.8781, "lon": -87.6298, "city": "Chicago"},
+    "YYZ": {"lat": 43.6532, "lon": -79.3832, "city": "Toronto"},
+    # Oceania
+    "SYD": {"lat": -33.8688, "lon": 151.2093, "city": "Sydney"},
+    "MEL": {"lat": -37.8136, "lon": 144.9631, "city": "Melbourne"},
+    # Africa
+    "JNB": {"lat": -26.2041, "lon": 28.0473, "city": "Johannesburg"},
+    "CAI": {"lat": 30.0444, "lon": 31.2357, "city": "Cairo"},
+    "NBO": {"lat": -1.2921, "lon": 36.8219, "city": "Nairobi"},
+    # Maldives / Sri Lanka
+    "MLE": {"lat": 4.1755, "lon": 73.5093, "city": "Male"},
+    "CMB": {"lat": 6.9271, "lon": 79.8612, "city": "Colombo"},
+}
 
 class AmadeusFlightSearch:
     def __init__(self):
@@ -299,6 +373,325 @@ class AmadeusFlightSearch:
                 }
         
         return flight_info
+
+    # ==================== HOTEL SEARCH ====================
+
+    def search_hotels_by_city(self, city_code, check_in, check_out, adults=1,
+                              ratings=None, currency="INR", max_hotels=15):
+        """
+        Search for hotels in a city using Amadeus Hotel APIs.
+
+        Step 1: Get hotel list by city code
+        Step 2: Get offers/prices for those hotels
+
+        Args:
+            city_code: IATA city code (e.g., "DXB")
+            check_in: Check-in date (YYYY-MM-DD or date object)
+            check_out: Check-out date (YYYY-MM-DD or date object)
+            adults: Number of adult guests
+            ratings: List of star ratings to filter (e.g., [3,4,5])
+            currency: Currency code
+            max_hotels: Max number of hotels to return
+
+        Returns:
+            dict with success, hotels list, errors
+        """
+        try:
+            token = self.get_access_token()
+            headers = {'Authorization': f'Bearer {token}'}
+
+            # Format dates
+            if hasattr(check_in, 'strftime'):
+                check_in = check_in.strftime("%Y-%m-%d")
+            if hasattr(check_out, 'strftime'):
+                check_out = check_out.strftime("%Y-%m-%d")
+
+            # Step 1: Get hotel list by city
+            params = {'cityCode': city_code.upper()}
+            if ratings:
+                params['ratings'] = ','.join(str(r) for r in ratings)
+
+            resp = requests.get(
+                AMADEUS_HOTEL_LIST_URL,
+                params=params,
+                headers=headers,
+                timeout=15
+            )
+            resp.raise_for_status()
+            hotel_list_data = resp.json().get('data', [])
+
+            if not hotel_list_data:
+                return {
+                    'success': True,
+                    'city_code': city_code,
+                    'hotels': [],
+                    'total_found': 0,
+                    'message': f'No hotels found in {city_code}'
+                }
+
+            # Take top hotels (limit to avoid API overload)
+            hotel_ids = [h['hotelId'] for h in hotel_list_data[:max_hotels]]
+
+            # Step 2: Try to get offers/prices (may fail in test environment)
+            parsed_hotels = []
+            try:
+                offer_params = {
+                    'hotelIds': ','.join(hotel_ids[:5]),  # Limit to avoid 400 errors
+                    'adults': adults,
+                    'checkInDate': check_in,
+                    'checkOutDate': check_out,
+                    'currency': currency,
+                }
+
+                offers_resp = requests.get(
+                    AMADEUS_HOTEL_OFFERS_URL,
+                    params=offer_params,
+                    headers=headers,
+                    timeout=20
+                )
+                if offers_resp.status_code == 200:
+                    offers_data = offers_resp.json().get('data', [])
+                    for hotel_offer in offers_data:
+                        parsed = self._parse_hotel_offer(hotel_offer, hotel_list_data)
+                        if parsed:
+                            parsed_hotels.append(parsed)
+            except Exception:
+                pass  # Offers API often fails in test env
+
+            # Fallback: if no offers, use hotel list data with estimated prices
+            if not parsed_hotels:
+                parsed_hotels = self._hotels_from_list(hotel_list_data[:max_hotels])
+
+            # Sort by star rating (higher first) then estimated price
+            parsed_hotels.sort(key=lambda h: (-(h.get('star_rating') or 0), h.get('price_per_night', float('inf'))))
+
+            return {
+                'success': True,
+                'city_code': city_code,
+                'hotels': parsed_hotels,
+                'total_found': len(parsed_hotels),
+            }
+
+        except requests.exceptions.HTTPError as e:
+            error_detail = ''
+            try:
+                error_detail = e.response.json().get('errors', [{}])[0].get('detail', '')
+            except Exception:
+                pass
+            return {
+                'success': False,
+                'city_code': city_code,
+                'hotels': [],
+                'total_found': 0,
+                'error': f'Hotel search error: {error_detail or str(e)}'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'city_code': city_code,
+                'hotels': [],
+                'total_found': 0,
+                'error': f'Hotel search failed: {str(e)}'
+            }
+
+    def _parse_hotel_offer(self, hotel_offer, hotel_list_data):
+        """Parse a single hotel offer from Amadeus response."""
+        try:
+            hotel = hotel_offer.get('hotel', {})
+            hotel_id = hotel.get('hotelId', '')
+            name = hotel.get('name', 'Unknown Hotel')
+
+            # Find star rating from hotel list data
+            rating = None
+            geo = {}
+            for h in hotel_list_data:
+                if h.get('hotelId') == hotel_id:
+                    rating = h.get('rating')
+                    geo = h.get('geoCode', {})
+                    break
+
+            # Get first offer (cheapest)
+            offers = hotel_offer.get('offers', [])
+            if not offers:
+                return None
+
+            first_offer = offers[0]
+            price_info = first_offer.get('price', {})
+            total_price = float(price_info.get('total', 0))
+            currency = price_info.get('currency', 'INR')
+
+            # Calculate per night price
+            room = first_offer.get('room', {})
+            room_type = room.get('typeEstimated', {})
+
+            check_in = first_offer.get('checkInDate', '')
+            check_out = first_offer.get('checkOutDate', '')
+            nights = 1
+            if check_in and check_out:
+                try:
+                    d1 = datetime.strptime(check_in, "%Y-%m-%d")
+                    d2 = datetime.strptime(check_out, "%Y-%m-%d")
+                    nights = max((d2 - d1).days, 1)
+                except Exception:
+                    pass
+
+            price_per_night = total_price / nights if nights > 0 else total_price
+
+            return {
+                'hotel_id': hotel_id,
+                'name': name,
+                'star_rating': int(rating) if rating else None,
+                'latitude': geo.get('latitude'),
+                'longitude': geo.get('longitude'),
+                'price_total': total_price,
+                'price_per_night': round(price_per_night, 2),
+                'currency': currency,
+                'room_type': room_type.get('category', 'STANDARD'),
+                'bed_type': room_type.get('bedType', 'UNKNOWN'),
+                'beds': room_type.get('beds', 1),
+                'check_in': check_in,
+                'check_out': check_out,
+                'nights': nights,
+                'data_source': 'amadeus',
+            }
+        except Exception:
+            return None
+
+    def _hotels_from_list(self, hotel_list_data):
+        """Create hotel entries from hotel list data when offers aren't available.
+        Uses real hotel names/ratings from Amadeus but marks prices as estimated."""
+        # Rough price estimates per star rating (INR per night)
+        price_estimates = {1: 1500, 2: 2500, 3: 4000, 4: 7000, 5: 15000}
+
+        parsed = []
+        for h in hotel_list_data:
+            rating = h.get('rating')
+            star = int(rating) if rating else 3
+            geo = h.get('geoCode', {})
+
+            parsed.append({
+                'hotel_id': h.get('hotelId', ''),
+                'name': h.get('name', 'Unknown Hotel'),
+                'star_rating': star,
+                'latitude': geo.get('latitude'),
+                'longitude': geo.get('longitude'),
+                'price_total': None,
+                'price_per_night': price_estimates.get(star, 5000),
+                'currency': 'INR',
+                'room_type': 'STANDARD',
+                'bed_type': 'UNKNOWN',
+                'beds': 1,
+                'check_in': None,
+                'check_out': None,
+                'nights': None,
+                'data_source': 'amadeus_list',  # Real name, estimated price
+            })
+        return parsed
+
+    # ==================== ACTIVITY/TOURS SEARCH ====================
+
+    def search_activities(self, latitude, longitude, radius=20):
+        """
+        Search for tours and activities near a location using Amadeus API.
+
+        Args:
+            latitude: Location latitude
+            longitude: Location longitude
+            radius: Search radius in km (default 20)
+
+        Returns:
+            dict with success, activities list
+        """
+        try:
+            token = self.get_access_token()
+            headers = {'Authorization': f'Bearer {token}'}
+
+            params = {
+                'latitude': latitude,
+                'longitude': longitude,
+                'radius': radius,
+            }
+
+            resp = requests.get(
+                AMADEUS_ACTIVITIES_URL,
+                params=params,
+                headers=headers,
+                timeout=15
+            )
+            resp.raise_for_status()
+            activities_data = resp.json().get('data', [])
+
+            parsed = []
+            for activity in activities_data:
+                parsed_activity = self._parse_activity(activity)
+                if parsed_activity:
+                    parsed.append(parsed_activity)
+
+            return {
+                'success': True,
+                'activities': parsed,
+                'total_found': len(parsed),
+            }
+
+        except requests.exceptions.HTTPError as e:
+            error_detail = ''
+            try:
+                error_detail = e.response.json().get('errors', [{}])[0].get('detail', '')
+            except Exception:
+                pass
+            return {
+                'success': False,
+                'activities': [],
+                'total_found': 0,
+                'error': f'Activity search error: {error_detail or str(e)}'
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'activities': [],
+                'total_found': 0,
+                'error': f'Activity search failed: {str(e)}'
+            }
+
+    def _parse_activity(self, activity):
+        """Parse a single activity from Amadeus response."""
+        try:
+            price = activity.get('price', {})
+            amount = price.get('amount')
+            currency = price.get('currencyCode', 'USD')
+
+            pictures = activity.get('pictures', [])
+            picture_url = pictures[0] if pictures else None
+
+            return {
+                'id': activity.get('id'),
+                'name': activity.get('name', 'Unknown Activity'),
+                'description': (activity.get('shortDescription') or activity.get('description', ''))[:200],
+                'price': float(amount) if amount else None,
+                'currency': currency,
+                'rating': activity.get('rating'),
+                'picture_url': picture_url,
+                'booking_link': activity.get('bookingLink'),
+                'duration': activity.get('duration'),
+                'category': activity.get('category'),
+                'data_source': 'amadeus',
+            }
+        except Exception:
+            return None
+
+    # ==================== COORDINATE HELPERS ====================
+
+    @staticmethod
+    def get_city_coordinates(iata_code):
+        """Get lat/lon coordinates for a city by IATA code."""
+        return CITY_COORDINATES.get(iata_code.upper())
+
+    @staticmethod
+    def get_city_name(iata_code):
+        """Get city name from IATA code."""
+        coords = CITY_COORDINATES.get(iata_code.upper())
+        return coords['city'] if coords else iata_code
+
 
 def format_duration(duration_str):
     """Convert ISO 8601 duration to readable format (e.g., PT5H30M -> 5h 30m)"""

@@ -214,6 +214,7 @@ export interface ActivityItem {
   time: string;
   activity: string;
   estimated_cost_inr: number;
+  data_source?: 'amadeus' | 'suggested';
 }
 
 export interface DayItinerary {
@@ -227,11 +228,18 @@ export interface HotelInfo {
   star_rating: number;
   price_per_night_inr: number;
   area: string;
+  data_source?: 'amadeus' | 'estimated';
 }
 
 export interface FlightEstimate {
   travel_class: string;
-  estimated_price_inr: number;
+  estimated_price_inr?: number;
+  price_inr?: number;
+  airline_name?: string;
+  flight_number?: string;
+  stops?: number;
+  duration?: string;
+  data_source?: 'amadeus' | 'estimated';
 }
 
 export interface TravelPackage {
@@ -251,8 +259,10 @@ export interface TravelPackage {
 
 export interface AutoPackageRequest {
   destination?: string;
+  destination_iata?: string;
   duration_days?: number;
   budget_inr?: number;
+  natural_language_query?: string;
   preferences?: {
     interests?: string[];
     budget_level?: string;
@@ -266,7 +276,46 @@ export interface AutoPackageResponse {
   personalization_note: string;
   model_used: string | null;
   used_fallback: boolean;
+  data_quality: 'full_realtime' | 'partial_realtime' | 'estimated';
   error: string | null;
+  amadeus_data?: {
+    flights_found: number;
+    hotels_found: number;
+    activities_found: number;
+  };
+}
+
+export interface NLPParseRequest {
+  query: string;
+}
+
+export interface NLPParseResponse {
+  success: boolean;
+  destination: string | null;
+  destination_iata: string | null;
+  duration_days: number | null;
+  budget_inr: number | null;
+  interests: string[];
+  travel_style: string;
+  travel_companions: string | null;
+  specific_requests: string | null;
+  model_used: string | null;
+  error: string | null;
+}
+
+export interface OnboardingStatus {
+  onboarding_completed: boolean;
+  has_preferences: boolean;
+  has_travel_history: boolean;
+}
+
+export interface SavePreferencesRequest {
+  interests?: string[];
+  budget_level?: string;
+  travel_style?: string;
+  preferred_destinations?: string[];
+  travel_companions?: string;
+  accommodation_preference?: string;
 }
 
 export interface TravelHistoryItem {
@@ -300,6 +349,36 @@ export const getTravelHistory = async (): Promise<TravelHistoryItem[]> => {
   } catch (error) {
     console.error('Error fetching travel history:', error);
     throw new Error('Failed to fetch travel history');
+  }
+};
+
+export const nlpParse = async (query: string): Promise<NLPParseResponse> => {
+  try {
+    const response = await api.post<NLPParseResponse>('/nlp-parse', { query });
+    return response.data;
+  } catch (error) {
+    console.error('Error parsing query:', error);
+    throw new Error('Failed to parse travel query');
+  }
+};
+
+export const getOnboardingStatus = async (): Promise<OnboardingStatus> => {
+  try {
+    const response = await api.get<OnboardingStatus>('/onboarding-status');
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching onboarding status:', error);
+    throw new Error('Failed to fetch onboarding status');
+  }
+};
+
+export const savePreferences = async (prefs: SavePreferencesRequest): Promise<{ success: boolean }> => {
+  try {
+    const response = await api.post('/save-preferences', prefs);
+    return response.data;
+  } catch (error) {
+    console.error('Error saving preferences:', error);
+    throw new Error('Failed to save preferences');
   }
 };
 

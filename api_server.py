@@ -25,6 +25,7 @@ from auth import (
     get_current_user, get_optional_user
 )
 from auto_package_generator import generate_packages
+from nlp_parser import extract_travel_intent
 
 from sqlalchemy import select
 
@@ -140,9 +141,22 @@ class PreferencesInput(BaseModel):
 
 class AutoPackageRequest(BaseModel):
     destination: Optional[str] = None
+    destination_iata: Optional[str] = None
     duration_days: int = 7
     budget_inr: Optional[int] = None
     preferences: PreferencesInput = PreferencesInput()
+    natural_language_query: Optional[str] = None
+
+class NLPParseRequest(BaseModel):
+    query: str
+
+class SavePreferencesRequest(BaseModel):
+    interests: Optional[List[str]] = None
+    budget_level: Optional[str] = "moderate"
+    travel_style: Optional[str] = "mixed"
+    preferred_destinations: Optional[List[str]] = None
+    travel_companions: Optional[str] = None
+    accommodation_preference: Optional[str] = "hotel"
 
 class TravelHistoryResponse(BaseModel):
     id: int
@@ -258,6 +272,84 @@ async def get_travel_history(current_user: dict = Depends(get_current_user)):
         ]
 
 
+# ==================== NLP + PERSONALIZATION ENDPOINTS ====================
+
+@app.post("/nlp-parse")
+async def nlp_parse(request: NLPParseRequest):
+    """Parse natural language travel query into structured intent."""
+    try:
+        result = extract_travel_intent(request.query)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"NLP parse error: {str(e)}")
+
+
+@app.get("/onboarding-status")
+async def get_onboarding_status(current_user: dict = Depends(get_current_user)):
+    """Check if user has completed personalization onboarding."""
+    async with async_session() as session:
+        pref_result = await session.execute(
+            select(UserPreferences)
+            .where(UserPreferences.user_id == current_user["user_id"])
+        )
+        prefs = pref_result.scalar_one_or_none()
+
+        return {
+            "onboarding_completed": prefs.onboarding_completed if prefs else False,
+            "has_preferences": prefs is not None,
+            "has_travel_history": False,  # filled below
+        }
+
+
+@app.post("/save-preferences")
+async def save_preferences(
+    request: SavePreferencesRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Save user personalization preferences (onboarding)."""
+    try:
+        async with async_session() as session:
+            pref_result = await session.execute(
+                select(UserPreferences)
+                .where(UserPreferences.user_id == current_user["user_id"])
+            )
+            existing = pref_result.scalar_one_or_none()
+
+            if existing:
+                if request.interests is not None:
+                    existing.interests = request.interests
+                if request.budget_level:
+                    existing.budget_level = request.budget_level
+                if request.travel_style:
+                    existing.travel_style = request.travel_style
+                if request.preferred_destinations is not None:
+                    existing.preferred_destinations = request.preferred_destinations
+                if request.travel_companions:
+                    existing.travel_companions = request.travel_companions
+                if request.accommodation_preference:
+                    existing.accommodation_preference = request.accommodation_preference
+                existing.onboarding_completed = True
+            else:
+                new_prefs = UserPreferences(
+                    user_id=current_user["user_id"],
+                    interests=request.interests or [],
+                    budget_level=request.budget_level or "moderate",
+                    travel_style=request.travel_style or "mixed",
+                    preferred_destinations=request.preferred_destinations or [],
+                    travel_companions=request.travel_companions,
+                    accommodation_preference=request.accommodation_preference or "hotel",
+                    onboarding_completed=True,
+                )
+                session.add(new_prefs)
+
+            await session.commit()
+
+        return {"success": True, "message": "Preferences saved"}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving preferences: {str(e)}")
+
+
 # ==================== AUTO PACKAGE ENDPOINTS ====================
 
 @app.post("/auto-packages")
@@ -265,8 +357,31 @@ async def get_auto_packages(
     request: AutoPackageRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Generate AI-powered travel packages based on user's travel history"""
+    """Generate AI-powered travel packages with real-time Amadeus data."""
     try:
+        destination = request.destination
+        destination_iata = request.destination_iata
+        duration = request.duration_days
+        budget = request.budget_inr
+
+        # If natural language query provided, parse it first
+        if request.natural_language_query:
+            nlp_result = extract_travel_intent(request.natural_language_query)
+            if nlp_result.get("success"):
+                if not destination and nlp_result.get("destination"):
+                    destination = nlp_result["destination"]
+                if not destination_iata and nlp_result.get("destination_iata"):
+                    destination_iata = nlp_result["destination_iata"]
+                if nlp_result.get("duration_days"):
+                    duration = nlp_result["duration_days"]
+                if nlp_result.get("budget_inr"):
+                    budget = nlp_result["budget_inr"]
+                # Merge NLP-extracted preferences
+                if nlp_result.get("interests") and not request.preferences.interests:
+                    request.preferences.interests = nlp_result["interests"]
+                if nlp_result.get("travel_style") and request.preferences.travel_style == "mixed":
+                    request.preferences.travel_style = nlp_result["travel_style"]
+
         # Fetch user's travel history from DB
         async with async_session() as session:
             result = await session.execute(
@@ -290,7 +405,7 @@ async def get_auto_packages(
             )
             user = user_result.scalar_one_or_none()
 
-        # Convert DB rows to dicts for the generator
+        # Convert DB rows to dicts
         history_dicts = [
             {
                 "origin_iata": h.origin_iata,
@@ -307,18 +422,21 @@ async def get_auto_packages(
             "interests": request.preferences.interests or (user_prefs.interests if user_prefs else []),
             "budget_level": request.preferences.budget_level or (user_prefs.budget_level if user_prefs else "moderate"),
             "travel_style": request.preferences.travel_style or (user_prefs.travel_style if user_prefs else "mixed"),
+            "travel_companions": (user_prefs.travel_companions if user_prefs else None),
+            "accommodation_preference": (user_prefs.accommodation_preference if user_prefs else "hotel"),
         }
 
         origin = user.home_airport if user and user.home_airport else "BOM"
 
-        # Generate packages
+        # Generate packages with real Amadeus data
         pkg_result = generate_packages(
             travel_history=history_dicts,
             preferences=preferences,
-            destination=request.destination,
+            destination=destination,
             origin_iata=origin,
-            duration_days=request.duration_days,
-            budget_inr=request.budget_inr,
+            duration_days=duration,
+            budget_inr=budget,
+            destination_iata=destination_iata,
         )
 
         # Save preferences if provided
@@ -373,6 +491,9 @@ async def root():
             "/auth/me",
             "/travel-history",
             "/auto-packages",
+            "/nlp-parse",
+            "/onboarding-status",
+            "/save-preferences",
         ]
     }
 
