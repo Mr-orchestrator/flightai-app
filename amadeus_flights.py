@@ -3,10 +3,13 @@ Amadeus Travel API Integration
 Search real-time flights, hotels, and activities using Amadeus APIs
 """
 import os
+import logging
 import threading
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -434,36 +437,49 @@ class AmadeusFlightSearch:
 
             # Take top hotels (limit to avoid API overload)
             hotel_ids = [h['hotelId'] for h in hotel_list_data[:max_hotels]]
+            logger.info(f"Hotel list API returned {len(hotel_list_data)} hotels for {city_code}")
 
-            # Step 2: Try to get offers/prices (may fail in test environment)
+            # Step 2: Try to get offers/prices in small batches
             parsed_hotels = []
-            try:
-                offer_params = {
-                    'hotelIds': ','.join(hotel_ids[:5]),  # Limit to avoid 400 errors
-                    'adults': adults,
-                    'checkInDate': check_in,
-                    'checkOutDate': check_out,
-                    'currency': currency,
-                }
+            live_hotel_ids = set()
 
-                offers_resp = requests.get(
-                    AMADEUS_HOTEL_OFFERS_URL,
-                    params=offer_params,
-                    headers=headers,
-                    timeout=20
-                )
-                if offers_resp.status_code == 200:
-                    offers_data = offers_resp.json().get('data', [])
-                    for hotel_offer in offers_data:
-                        parsed = self._parse_hotel_offer(hotel_offer, hotel_list_data)
-                        if parsed:
-                            parsed_hotels.append(parsed)
-            except Exception:
-                pass  # Offers API often fails in test env
+            # Try batches of 3 to reduce 400 errors from Amadeus
+            batch_size = 3
+            for i in range(0, min(len(hotel_ids), 12), batch_size):
+                batch = hotel_ids[i:i + batch_size]
+                try:
+                    offer_params = {
+                        'hotelIds': ','.join(batch),
+                        'adults': adults,
+                        'checkInDate': check_in,
+                        'checkOutDate': check_out,
+                        'currency': currency,
+                    }
 
-            # Fallback: if no offers, use hotel list data with estimated prices
-            if not parsed_hotels:
-                parsed_hotels = self._hotels_from_list(hotel_list_data[:max_hotels])
+                    offers_resp = requests.get(
+                        AMADEUS_HOTEL_OFFERS_URL,
+                        params=offer_params,
+                        headers=headers,
+                        timeout=20
+                    )
+                    if offers_resp.status_code == 200:
+                        offers_data = offers_resp.json().get('data', [])
+                        for hotel_offer in offers_data:
+                            parsed = self._parse_hotel_offer(hotel_offer, hotel_list_data)
+                            if parsed:
+                                parsed_hotels.append(parsed)
+                                live_hotel_ids.add(parsed['hotel_id'])
+                        logger.info(f"Hotel offers batch {i//batch_size + 1}: got {len(offers_data)} offers")
+                    else:
+                        logger.warning(f"Hotel offers batch {i//batch_size + 1} returned {offers_resp.status_code}")
+                except Exception as e:
+                    logger.warning(f"Hotel offers batch {i//batch_size + 1} failed: {e}")
+
+            # Fill remaining with list data (estimated prices) for hotels not in live set
+            if len(parsed_hotels) < max_hotels:
+                remaining = [h for h in hotel_list_data[:max_hotels]
+                             if h.get('hotelId') not in live_hotel_ids]
+                parsed_hotels.extend(self._hotels_from_list(remaining[:max_hotels - len(parsed_hotels)]))
 
             # Sort by star rating (higher first) then estimated price
             parsed_hotels.sort(key=lambda h: (-(h.get('star_rating') or 0), h.get('price_per_night', float('inf'))))

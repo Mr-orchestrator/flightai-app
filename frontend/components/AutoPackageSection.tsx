@@ -45,6 +45,25 @@ const ACCOMMODATION_OPTIONS = [
   { id: 'hostel', label: 'Hostel' },
 ];
 
+const FREQUENCY_OPTIONS = [
+  { id: 'rarely', label: 'Rarely (0-1/year)' },
+  { id: 'sometimes', label: 'Sometimes (2-3/year)' },
+  { id: 'often', label: 'Often (4+/year)' },
+];
+
+const AIRLINE_OPTIONS = [
+  { id: 'AI', label: 'Air India' },
+  { id: '6E', label: 'IndiGo' },
+  { id: 'UK', label: 'Vistara' },
+  { id: 'EK', label: 'Emirates' },
+  { id: 'QR', label: 'Qatar Airways' },
+  { id: 'SQ', label: 'Singapore Airlines' },
+  { id: 'BA', label: 'British Airways' },
+  { id: 'LH', label: 'Lufthansa' },
+];
+
+const ONBOARDING_STEPS = 5;
+
 const TIER_STYLES: Record<string, { border: string; badge: string; glow: string; accent: string }> = {
   budget: {
     border: 'border-green-500/30',
@@ -75,6 +94,13 @@ function DataSourceBadge({ source }: { source?: string }) {
     return (
       <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
         <FiDatabase className="w-2.5 h-2.5" /> LIVE
+      </span>
+    );
+  }
+  if (source === 'amadeus_list') {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-400 border border-sky-500/30">
+        <FiDatabase className="w-2.5 h-2.5" /> LISTED
       </span>
     );
   }
@@ -116,9 +142,16 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   // Onboarding
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingChecked, setOnboardingChecked] = useState(false);
+  const [onboardingStep, setOnboardingStep] = useState(1);
   const [companions, setCompanions] = useState('');
   const [accommodation, setAccommodation] = useState('hotel');
   const [dreamDestinations, setDreamDestinations] = useState('');
+  const [budgetMin, setBudgetMin] = useState(20000);
+  const [budgetMax, setBudgetMax] = useState(100000);
+  const [travelFrequency, setTravelFrequency] = useState('');
+  const [preferredAirlines, setPreferredAirlines] = useState<string[]>([]);
+  const [dietaryNeeds, setDietaryNeeds] = useState('');
+  const [accessibilityNeeds, setAccessibilityNeeds] = useState('');
 
   // Check onboarding status on mount
   useEffect(() => {
@@ -140,6 +173,12 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
     );
   };
 
+  const toggleAirline = (id: string) => {
+    setPreferredAirlines((prev) =>
+      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
+    );
+  };
+
   const handleSaveOnboarding = async () => {
     try {
       await savePreferences({
@@ -149,11 +188,19 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
         preferred_destinations: dreamDestinations ? dreamDestinations.split(',').map(d => d.trim()) : [],
         travel_companions: companions || undefined,
         accommodation_preference: accommodation,
+        budget_range_min: budgetMin,
+        budget_range_max: budgetMax,
+        travel_frequency: travelFrequency || undefined,
+        preferred_airlines: preferredAirlines.length > 0 ? preferredAirlines : undefined,
+        dietary_needs: dietaryNeeds ? dietaryNeeds.split(',').map(d => d.trim()) : undefined,
+        accessibility_needs: accessibilityNeeds ? accessibilityNeeds.split(',').map(d => d.trim()) : undefined,
+        onboarding_step: ONBOARDING_STEPS,
       });
       setShowOnboarding(false);
+      setOnboardingStep(1);
     } catch {
-      // Non-critical, just close
       setShowOnboarding(false);
+      setOnboardingStep(1);
     }
   };
 
@@ -226,7 +273,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
       transition={{ duration: 0.8, delay: 0.3 }}
       className="mt-16 max-w-7xl mx-auto"
     >
-      {/* Onboarding Modal */}
+      {/* Multi-Step Onboarding Wizard */}
       <AnimatePresence>
         {showOnboarding && (
           <motion.div
@@ -242,105 +289,243 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
               className="bg-navy-900 border border-gold-500/20 rounded-2xl shadow-2xl max-w-lg w-full p-8 relative"
             >
               <button
-                onClick={() => setShowOnboarding(false)}
+                onClick={() => { setShowOnboarding(false); setOnboardingStep(1); }}
                 className="absolute top-4 right-4 text-premium-mist/40 hover:text-white"
               >
                 <FiX className="w-5 h-5" />
               </button>
 
+              {/* Step indicator */}
+              <div className="flex items-center gap-1 mb-6">
+                {Array.from({ length: ONBOARDING_STEPS }).map((_, i) => (
+                  <div key={i} className="flex-1 flex items-center">
+                    <div className={`h-1.5 w-full rounded-full transition-all duration-300 ${
+                      i + 1 <= onboardingStep ? 'bg-gold-400' : 'bg-premium-surface/50'
+                    }`} />
+                  </div>
+                ))}
+              </div>
+
               <div className="text-center mb-6">
                 <FiUsers className="w-10 h-10 text-gold-400 mx-auto mb-3" />
-                <h3 className="text-xl font-display font-bold text-white">Tell us about yourself</h3>
-                <p className="text-premium-mist/60 text-sm mt-1">Help us personalize your travel packages</p>
+                <h3 className="text-xl font-display font-bold text-white">
+                  {onboardingStep === 1 && 'What interests you?'}
+                  {onboardingStep === 2 && 'Budget & Travel Companions'}
+                  {onboardingStep === 3 && 'Travel Habits & Airlines'}
+                  {onboardingStep === 4 && 'Special Needs'}
+                  {onboardingStep === 5 && 'Dream Destinations'}
+                </h3>
+                <p className="text-premium-mist/60 text-sm mt-1">Step {onboardingStep} of {ONBOARDING_STEPS}</p>
               </div>
 
-              {/* Interests */}
-              <div className="mb-5">
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">What interests you?</label>
-                <div className="flex flex-wrap gap-2">
-                  {INTEREST_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => toggleInterest(opt.id)}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
-                        selectedInterests.includes(opt.id)
-                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                      }`}
-                    >
-                      {opt.icon} {opt.label}
-                    </button>
-                  ))}
+              {/* Step 1: Interests */}
+              {onboardingStep === 1 && (
+                <div className="mb-6">
+                  <div className="flex flex-wrap gap-2">
+                    {INTEREST_OPTIONS.map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => toggleInterest(opt.id)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+                          selectedInterests.includes(opt.id)
+                            ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                            : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                        }`}
+                      >
+                        {opt.icon} {opt.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Travel companions */}
-              <div className="mb-5">
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                  <FiUsers className="inline mr-1" /> Who do you travel with?
-                </label>
-                <div className="flex gap-2">
-                  {COMPANION_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setCompanions(opt.id)}
-                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                        companions === opt.id
-                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+              {/* Step 2: Budget + Companions */}
+              {onboardingStep === 2 && (
+                <div className="space-y-5 mb-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                      <FiDollarSign className="inline mr-1" /> Budget Range (INR)
+                    </label>
+                    <div className="flex items-center gap-3">
+                      <input
+                        type="number"
+                        value={budgetMin}
+                        onChange={(e) => setBudgetMin(parseInt(e.target.value) || 0)}
+                        placeholder="Min"
+                        className="flex-1 px-3 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                      />
+                      <span className="text-premium-mist/40">to</span>
+                      <input
+                        type="number"
+                        value={budgetMax}
+                        onChange={(e) => setBudgetMax(parseInt(e.target.value) || 0)}
+                        placeholder="Max"
+                        className="flex-1 px-3 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                      <FiUsers className="inline mr-1" /> Who do you travel with?
+                    </label>
+                    <div className="flex gap-2">
+                      {COMPANION_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setCompanions(opt.id)}
+                          className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                            companions === opt.id
+                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Accommodation */}
-              <div className="mb-5">
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                  <FiHome className="inline mr-1" /> Preferred accommodation
-                </label>
-                <div className="flex gap-2">
-                  {ACCOMMODATION_OPTIONS.map((opt) => (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      onClick={() => setAccommodation(opt.id)}
-                      className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                        accommodation === opt.id
-                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  ))}
+              {/* Step 3: Travel frequency + Preferred airlines */}
+              {onboardingStep === 3 && (
+                <div className="space-y-5 mb-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                      <FiCalendar className="inline mr-1" /> How often do you travel?
+                    </label>
+                    <div className="flex gap-2">
+                      {FREQUENCY_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setTravelFrequency(opt.id)}
+                          className={`px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
+                            travelFrequency === opt.id
+                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Preferred Airlines</label>
+                    <div className="flex flex-wrap gap-2">
+                      {AIRLINE_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => toggleAirline(opt.id)}
+                          className={`px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
+                            preferredAirlines.includes(opt.id)
+                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
 
-              {/* Dream destinations */}
-              <div className="mb-6">
-                <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                  <FiMapPin className="inline mr-1" /> Dream destinations (comma-separated)
-                </label>
-                <input
-                  type="text"
-                  value={dreamDestinations}
-                  onChange={(e) => setDreamDestinations(e.target.value)}
-                  placeholder="e.g. Paris, Tokyo, Bali"
-                  className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                />
-              </div>
+              {/* Step 4: Dietary + Accessibility */}
+              {onboardingStep === 4 && (
+                <div className="space-y-5 mb-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Dietary Needs (comma-separated, optional)</label>
+                    <input
+                      type="text"
+                      value={dietaryNeeds}
+                      onChange={(e) => setDietaryNeeds(e.target.value)}
+                      placeholder="e.g. Vegetarian, Vegan, Halal, Gluten-free"
+                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Accessibility Needs (comma-separated, optional)</label>
+                    <input
+                      type="text"
+                      value={accessibilityNeeds}
+                      onChange={(e) => setAccessibilityNeeds(e.target.value)}
+                      placeholder="e.g. Wheelchair access, Elevator required"
+                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                    />
+                  </div>
+                </div>
+              )}
 
-              <button
-                onClick={handleSaveOnboarding}
-                className="w-full px-6 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 hover:scale-[1.02] transition-transform"
-              >
-                Save & Continue
-              </button>
+              {/* Step 5: Dream destinations + Accommodation */}
+              {onboardingStep === 5 && (
+                <div className="space-y-5 mb-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                      <FiMapPin className="inline mr-1" /> Dream destinations (comma-separated)
+                    </label>
+                    <input
+                      type="text"
+                      value={dreamDestinations}
+                      onChange={(e) => setDreamDestinations(e.target.value)}
+                      placeholder="e.g. Paris, Tokyo, Bali"
+                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
+                      <FiHome className="inline mr-1" /> Preferred accommodation
+                    </label>
+                    <div className="flex gap-2">
+                      {ACCOMMODATION_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => setAccommodation(opt.id)}
+                          className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
+                            accommodation === opt.id
+                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Navigation buttons */}
+              <div className="flex gap-3">
+                {onboardingStep > 1 && (
+                  <button
+                    onClick={() => setOnboardingStep(s => s - 1)}
+                    className="flex-1 px-6 py-3 border border-premium-border rounded-xl font-display font-bold text-premium-mist/70 hover:text-white hover:border-gold-500/30 transition-all"
+                  >
+                    Back
+                  </button>
+                )}
+                {onboardingStep < ONBOARDING_STEPS ? (
+                  <button
+                    onClick={() => setOnboardingStep(s => s + 1)}
+                    className="flex-1 px-6 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 hover:scale-[1.02] transition-transform"
+                  >
+                    Next
+                  </button>
+                ) : (
+                  <button
+                    onClick={handleSaveOnboarding}
+                    className="flex-1 px-6 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 hover:scale-[1.02] transition-transform"
+                  >
+                    Save & Start Exploring
+                  </button>
+                )}
+              </div>
             </motion.div>
           </motion.div>
         )}

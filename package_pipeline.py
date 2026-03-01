@@ -242,10 +242,14 @@ def normalize_amadeus_data(
     norm_activities = norm_activities[:max_activities]
 
     # --- Data Quality (deterministic rules) ---
+    # "amadeus" = fully live (price + name from API)
+    # "amadeus_list" = partial live (real name from API, estimated price)
     flights_quality = "live" if any(f.data_source == "amadeus" for f in norm_flights) else "none"
+    hotels_live = any(h.data_source == "amadeus" for h in norm_hotels)
+    hotels_partial = any(h.data_source == "amadeus_list" for h in norm_hotels)
     hotels_quality = (
-        "live" if any(h.data_source == "amadeus" for h in norm_hotels)
-        else "estimated" if norm_hotels
+        "live" if hotels_live
+        else "estimated" if hotels_partial or norm_hotels
         else "none"
     )
     activities_quality = "live" if any(a.data_source == "amadeus" for a in norm_activities) else "none"
