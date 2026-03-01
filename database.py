@@ -51,6 +51,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     travel_history = relationship("TravelHistory", back_populates="user", lazy="selectin")
+    booking_history = relationship("BookingHistory", back_populates="user", lazy="selectin")
     preferences = relationship("UserPreferences", back_populates="user", uselist=False, lazy="selectin")
 
 
@@ -67,6 +68,42 @@ class TravelHistory(Base):
     searched_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", back_populates="travel_history")
+
+
+class BookingHistory(Base):
+    """Explicit booking signals — primary source for personalization inference."""
+    __tablename__ = "booking_history"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    origin_iata = Column(String(3), nullable=False)
+    destination_iata = Column(String(3), nullable=False)
+    destination_city = Column(String(255), nullable=True)
+    duration_days = Column(Integer, nullable=True)
+    cabin_class = Column(String(20), nullable=True)           # ECONOMY / BUSINESS
+    hotel_star_rating = Column(Integer, nullable=True)         # 3 / 4 / 5
+    carrier_codes = Column(JSON, default=list)                 # ["EK", "QR"]
+    hotel_name = Column(String(255), nullable=True)
+    total_price_inr = Column(Integer, nullable=True)
+    tier_selected = Column(String(20), nullable=True)          # budget / standard / premium
+    package_snapshot_id = Column(String(36), ForeignKey("package_snapshots.id"), nullable=True)
+    booked_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", back_populates="booking_history")
+
+
+class EngagementSignal(Base):
+    """Implicit behavioral signals — secondary source for personalization (weight: 0.4)."""
+    __tablename__ = "engagement_signals"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    signal_type = Column(String(20), nullable=False)           # "tier_expand" | "tier_view"
+    destination_iata = Column(String(3), nullable=True)
+    tier = Column(String(20), nullable=True)                   # budget / standard / premium
+    cabin_class = Column(String(20), nullable=True)            # from the tier they expanded
+    hotel_star_rating = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class UserPreferences(Base):

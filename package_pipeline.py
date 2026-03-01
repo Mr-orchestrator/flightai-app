@@ -7,7 +7,9 @@ Pipeline: Amadeus Data → Normalize → Build Tiers → (LLM Narrative) → Val
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -111,6 +113,7 @@ class TierSelection:
     budget_warning: Optional[str] = None
     limited_activity_data: bool = False
     preference_matches: list[str] = field(default_factory=list)
+    personalization_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -428,6 +431,44 @@ def _apply_personalization_scoring(
     return flights, hotels, activities, matches
 
 
+def _generate_personalization_reasons(
+    flight: Optional[NormalizedFlight],
+    hotel: Optional[NormalizedHotel],
+    preferences: Optional[dict],
+    nights: int,
+) -> list[str]:
+    """
+    Generate human-readable personalization reasons for a tier.
+    These are displayed as gold tags on the UI tier cards.
+    """
+    if not preferences:
+        return []
+
+    reasons = []
+    preferred_airlines = preferences.get("preferred_airlines", [])
+    cabin_pref = preferences.get("cabin_preference")
+    hotel_star_pref = preferences.get("hotel_star_preference")
+    duration_source = preferences.get("duration_source")
+
+    # Airline match
+    if flight and preferred_airlines and flight.carrier in preferred_airlines:
+        reasons.append(f"{flight.airline_name} \u2014 your preferred airline")
+
+    # Cabin class match
+    if flight and cabin_pref and flight.cabin == cabin_pref:
+        reasons.append(f"{flight.cabin.replace('_', ' ').title()} class \u2014 your usual travel style")
+
+    # Hotel star match
+    if hotel and hotel_star_pref and hotel.star_rating == hotel_star_pref:
+        reasons.append(f"{hotel.star_rating}\u2605 hotel matches your preference")
+
+    # Duration inferred from history
+    if duration_source == "history":
+        reasons.append(f"{nights}-day trip matches your typical duration")
+
+    return reasons
+
+
 def build_tiers(
     data: NormalizedData,
     nights: int,
@@ -465,6 +506,9 @@ def build_tiers(
         acts = _select_activities(activities, daily_cap, nights, adults)
         total = _compute_total(flight, hotel, acts, adults)
 
+        # Generate per-tier personalization reasons
+        reasons = _generate_personalization_reasons(flight, hotel, preferences, nights)
+
         tiers.append(TierSelection(
             tier=tier_name,
             flight=flight,
@@ -474,6 +518,7 @@ def build_tiers(
             activity_budget_per_day_inr=daily_cap,
             limited_activity_data=limited_activity,
             preference_matches=pref_matches if tier_name == "standard" else [],
+            personalization_reasons=reasons,
         ))
 
     # Enforce ordering: sort by total, assign labels
@@ -525,6 +570,7 @@ def _adapt_budget_tier(
             activity_budget_per_day_inr=1000,
             limited_activity_data=tier.limited_activity_data,
             preference_matches=tier.preference_matches,
+            personalization_reasons=tier.personalization_reasons,
         )
 
     # Still over budget — add warning
@@ -534,6 +580,140 @@ def _adapt_budget_tier(
         f"Consider adjusting dates or destination."
     )
     return tier
+
+
+# ==================== LAYER 3: ITINERARY ACTIVITY VALIDATION ====================
+
+# Freeform activities that are NOT from Amadeus data — always allowed
+_FREEFORM_KEYWORDS = {
+    "free time", "leisure", "explore", "departure", "arrival",
+    "check-in", "check-out", "rest", "relax", "at leisure", "on your own",
+    "travel day", "transfer", "airport",
+}
+
+ACT_TOKEN_PATTERN = re.compile(r"\[ACT-(\d+)\]")
+
+
+def _validate_itinerary_activities(
+    daily_itinerary: list[dict],
+    valid_activities: dict,
+    threshold: float = 0.6,
+) -> tuple[list[dict], list[str]]:
+    """
+    Validate itinerary activities against known Amadeus activities.
+
+    Two-step matching:
+    1. Check for [ACT-N] ID token in activity text -> exact match by ID
+    2. Fallback: fuzzy name matching via SequenceMatcher
+
+    Args:
+        daily_itinerary: LLM-generated daily itinerary (list of day dicts)
+        valid_activities: dict of {act_id: canonical_name} from tier selection
+        threshold: minimum SequenceMatcher ratio for fuzzy match (default 0.6)
+
+    Returns:
+        (corrected_itinerary, warnings)
+    """
+    if not daily_itinerary or not valid_activities:
+        return daily_itinerary or [], []
+
+    warnings = []
+    corrected = []
+
+    # Build reverse lookup: lowercase canonical name -> (act_id, canonical_name)
+    name_lookup = {name.lower(): (act_id, name) for act_id, name in valid_activities.items()}
+    # ID lookup: "1" -> canonical_name
+    id_lookup = {str(act_id): name for act_id, name in valid_activities.items()}
+
+    for day_entry in daily_itinerary:
+        if not isinstance(day_entry, dict):
+            corrected.append(day_entry)
+            continue
+
+        corrected_day = {**day_entry}
+        day_activities = day_entry.get("activities", [])
+        corrected_activities = []
+
+        for act_entry in day_activities:
+            if not isinstance(act_entry, dict):
+                corrected_activities.append(act_entry)
+                continue
+
+            activity_text = act_entry.get("activity", "")
+            activity_lower = activity_text.lower().strip()
+
+            # Skip freeform activities (leisure, explore, departure, etc.)
+            if any(kw in activity_lower for kw in _FREEFORM_KEYWORDS):
+                corrected_activities.append(act_entry)
+                continue
+
+            matched = False
+
+            # Step 1: Check for [ACT-N] token
+            token_match = ACT_TOKEN_PATTERN.search(activity_text)
+            if token_match:
+                act_num = token_match.group(1)
+                if act_num in id_lookup:
+                    canonical_name = id_lookup[act_num]
+                    # Keep the LLM's text but ensure it references the right activity
+                    corrected_entry = {**act_entry}
+                    # If the name is wildly different from canonical, correct it
+                    clean_text = ACT_TOKEN_PATTERN.sub("", activity_text).strip(" -:")
+                    ratio = SequenceMatcher(None, clean_text.lower(), canonical_name.lower()).ratio()
+                    if ratio < 0.5:
+                        # LLM used the ID token but changed the name significantly
+                        corrected_entry["activity"] = f"[ACT-{act_num}] {canonical_name}"
+                        warnings.append(
+                            f"Day {day_entry.get('day', '?')}: corrected '{activity_text}' -> '{canonical_name}' (matched by ID)"
+                        )
+                    corrected_activities.append(corrected_entry)
+                    matched = True
+                else:
+                    warnings.append(
+                        f"Day {day_entry.get('day', '?')}: invalid ACT token [ACT-{act_num}] in '{activity_text}'"
+                    )
+
+            # Step 2: Fuzzy name match (if no ID token matched)
+            if not matched:
+                best_ratio = 0.0
+                best_name = None
+                best_id = None
+
+                for name_lower, (act_id, canonical) in name_lookup.items():
+                    ratio = SequenceMatcher(None, activity_lower, name_lower).ratio()
+                    if ratio > best_ratio:
+                        best_ratio = ratio
+                        best_name = canonical
+                        best_id = act_id
+
+                if best_ratio >= threshold:
+                    corrected_entry = {**act_entry}
+                    if best_ratio < 0.95:
+                        # Near match — correct to canonical name
+                        corrected_entry["activity"] = best_name
+                        warnings.append(
+                            f"Day {day_entry.get('day', '?')}: fuzzy-matched '{activity_text}' -> "
+                            f"'{best_name}' (ratio={best_ratio:.2f})"
+                        )
+                    corrected_activities.append(corrected_entry)
+                else:
+                    # Both matching strategies failed — replace with free time
+                    corrected_entry = {
+                        **act_entry,
+                        "activity": "Free time / explore the city",
+                        "estimated_cost_inr": 0,
+                        "data_source": "suggested",
+                    }
+                    corrected_activities.append(corrected_entry)
+                    warnings.append(
+                        f"Day {day_entry.get('day', '?')}: LLM-invented activity '{activity_text}' "
+                        f"replaced with free time (best fuzzy={best_ratio:.2f})"
+                    )
+
+        corrected_day["activities"] = corrected_activities
+        corrected.append(corrected_day)
+
+    return corrected, warnings
 
 
 # ==================== LAYER 3: POST-LLM VALIDATOR ====================
@@ -591,6 +771,17 @@ def validate_llm_response(
         missing = REQUIRED_PACKAGE_FIELDS - set(pkg.keys())
         if missing:
             warnings.append(f"{tier_sel.tier}: missing fields {missing}, filled with defaults")
+
+        # Validate itinerary activities against selected activities
+        if pkg.get("daily_itinerary") and tier_sel.activities:
+            valid_acts = {}
+            for idx, act in enumerate(tier_sel.activities, start=1):
+                valid_acts[str(idx)] = act.name
+            corrected_itin, act_warnings = _validate_itinerary_activities(
+                pkg["daily_itinerary"], valid_acts
+            )
+            pkg["daily_itinerary"] = corrected_itin
+            warnings.extend(act_warnings)
 
         corrected_packages.append(pkg)
 
@@ -677,6 +868,7 @@ def _build_corrected_package(
         "budget_warning": tier_sel.budget_warning,
         "limited_activity_data": tier_sel.limited_activity_data,
         "preference_matches": tier_sel.preference_matches,
+        "personalization_reasons": tier_sel.personalization_reasons,
         "data_quality_detail": None,  # Set by caller
     }
 

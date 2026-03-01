@@ -255,7 +255,7 @@ export interface TravelPackage {
   daily_itinerary: DayItinerary[];
   inclusions: string[];
   highlights: string[];
-  // New pipeline fields
+  // Pipeline fields
   flight_offer_id?: string;
   hotel_offer_id?: string;
   activity_ids?: string[];
@@ -263,6 +263,9 @@ export interface TravelPackage {
   hotel_total_inr?: number;
   fx_rate_used?: number;
   validation_warnings?: string[];
+  // Personalization
+  personalization_reasons?: string[];
+  preference_matches?: string[];
 }
 
 export interface AutoPackageRequest {
@@ -304,6 +307,9 @@ export interface AutoPackageResponse {
   };
   validation_warnings?: string[];
   inference_log?: Record<string, unknown>;
+  // Profile intelligence metadata
+  resolved_origin?: { iata: string; source: string };
+  booking_count?: number;
 }
 
 export interface NLPParseRequest {
@@ -422,6 +428,59 @@ export const savePreferences = async (prefs: SavePreferencesRequest): Promise<{ 
   } catch (error) {
     console.error('Error saving preferences:', error);
     throw new Error('Failed to save preferences');
+  }
+};
+
+// ==================== BOOKING + ENGAGEMENT TYPES ====================
+
+export interface BookPackageRequest {
+  tier: string;
+  origin_iata: string;
+  destination_iata: string;
+  destination_city?: string;
+  duration_days?: number;
+  cabin_class?: string;
+  hotel_star_rating?: number;
+  carrier_codes?: string[];
+  hotel_name?: string;
+  total_price_inr?: number;
+  package_snapshot_id?: string;
+}
+
+export interface TrackEngagementRequest {
+  signal_type: 'tier_expand' | 'tier_view';
+  destination_iata?: string;
+  tier?: string;
+  cabin_class?: string;
+  hotel_star_rating?: number;
+}
+
+/**
+ * Save a trip booking — primary signal for personalization
+ */
+export const bookPackage = async (
+  request: BookPackageRequest
+): Promise<{ success: boolean; booking_id?: number }> => {
+  try {
+    const response = await api.post('/book-package', request);
+    return response.data;
+  } catch (error) {
+    console.error('Error saving booking:', error);
+    throw new Error('Failed to save trip');
+  }
+};
+
+/**
+ * Track implicit engagement signal — fire and forget
+ */
+export const trackEngagement = async (
+  request: TrackEngagementRequest
+): Promise<void> => {
+  try {
+    await api.post('/track-engagement', request);
+  } catch (error) {
+    // Fire-and-forget: log but don't throw
+    console.warn('Engagement tracking failed:', error);
   }
 };
 

@@ -12,8 +12,12 @@ import {
 } from 'react-icons/fi';
 import {
   fetchAutoPackages, fetchAutoPackagesStream, getOnboardingStatus, savePreferences,
+  bookPackage, trackEngagement,
 } from '@/lib/api';
-import type { TravelPackage, AutoPackageResponse, ProgressEvent } from '@/lib/api';
+import type {
+  TravelPackage, AutoPackageResponse, ProgressEvent,
+  BookPackageRequest, TrackEngagementRequest,
+} from '@/lib/api';
 
 interface AutoPackageSectionProps {
   originIata: string;
@@ -128,6 +132,14 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [modelUsed, setModelUsed] = useState<string | null>(null);
   const [dataQuality, setDataQuality] = useState<string | null>(null);
   const [amadeusStats, setAmadeusStats] = useState<{ flights_found: number; hotels_found: number; activities_found: number } | null>(null);
+
+  // Profile intelligence metadata
+  const [bookingCount, setBookingCount] = useState(0);
+  const [resolvedOrigin, setResolvedOrigin] = useState<{ iata: string; source: string } | null>(null);
+
+  // Save trip state
+  const [savingTier, setSavingTier] = useState<string | null>(null);
+  const [savedTiers, setSavedTiers] = useState<Set<string>>(new Set());
 
   // Progress tracking
   const [progressPercent, setProgressPercent] = useState(0);
@@ -261,6 +273,9 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
           setModelUsed(result.model_used);
           setDataQuality(result.data_quality);
           setAmadeusStats(result.amadeus_data || null);
+          setBookingCount(result.booking_count || 0);
+          setResolvedOrigin(result.resolved_origin || null);
+          setSavedTiers(new Set()); // Reset for new packages
         } else {
           setError(result.error || 'No packages generated');
         }
@@ -847,6 +862,27 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
               transition={{ duration: 0.6 }}
               className="mt-10"
             >
+              {/* Profile intelligence banner */}
+              {(bookingCount > 0 || resolvedOrigin) && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-6 p-3 bg-gold-500/5 border border-gold-500/15 rounded-xl flex items-center gap-3 text-sm"
+                >
+                  <span className="text-gold-400 text-base">&#10022;</span>
+                  <span className="text-premium-mist/70">
+                    {bookingCount > 0
+                      ? `Personalized based on ${bookingCount} past booking${bookingCount !== 1 ? 's' : ''}`
+                      : 'Personalized from your preferences'}
+                    {resolvedOrigin && (
+                      <> &middot; Departing from <span className="text-white font-semibold">{resolvedOrigin.iata}</span>
+                        <span className="text-premium-mist/40"> ({resolvedOrigin.source})</span>
+                      </>
+                    )}
+                  </span>
+                </motion.div>
+              )}
+
               {/* Tier filter tabs */}
               <div className="flex gap-2 mb-8">
                 {[
@@ -974,9 +1010,37 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                           </div>
                         )}
 
+                        {/* Personalization reasons badges */}
+                        {pkg.personalization_reasons && pkg.personalization_reasons.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5 mb-3">
+                            {pkg.personalization_reasons.map((reason, i) => (
+                              <span
+                                key={i}
+                                className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 bg-gold-500/10 text-gold-400 border border-gold-500/20 rounded-full"
+                              >
+                                <span className="text-gold-400">&#10022;</span>
+                                {reason}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
                         {/* Expand itinerary button */}
                         <button
-                          onClick={() => setExpandedTier(isExpanded ? null : pkg.tier)}
+                          onClick={() => {
+                            const newTier = isExpanded ? null : pkg.tier;
+                            setExpandedTier(newTier);
+                            // Track engagement when expanding (not collapsing)
+                            if (newTier && isAuth) {
+                              trackEngagement({
+                                signal_type: 'tier_expand',
+                                destination_iata: pkg.destination_iata,
+                                tier: pkg.tier,
+                                cabin_class: pkg.flights.travel_class,
+                                hotel_star_rating: pkg.hotel.star_rating,
+                              });
+                            }
+                          }}
                           className="w-full flex items-center justify-center gap-2 py-2 text-sm font-semibold text-gold-400 hover:text-gold-300 transition-colors"
                         >
                           {isExpanded ? (
@@ -985,6 +1049,51 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                             <>View {pkg.duration_days}-Day Itinerary <FiChevronDown /></>
                           )}
                         </button>
+
+                        {/* Save Trip button */}
+                        {isAuth && (
+                          <button
+                            onClick={async () => {
+                              if (savedTiers.has(pkg.tier) || savingTier === pkg.tier) return;
+                              setSavingTier(pkg.tier);
+                              try {
+                                await bookPackage({
+                                  tier: pkg.tier,
+                                  origin_iata: resolvedOrigin?.iata || originIata,
+                                  destination_iata: pkg.destination_iata,
+                                  destination_city: pkg.destination_city,
+                                  duration_days: pkg.duration_days,
+                                  cabin_class: pkg.flights.travel_class,
+                                  hotel_star_rating: pkg.hotel.star_rating,
+                                  carrier_codes: pkg.flights.flight_number ? [pkg.flights.flight_number.substring(0, 2)] : undefined,
+                                  hotel_name: pkg.hotel.name,
+                                  total_price_inr: pkg.estimated_total_inr,
+                                });
+                                setSavedTiers(prev => new Set(prev).add(pkg.tier));
+                              } catch (err) {
+                                console.error('Failed to save trip:', err);
+                              } finally {
+                                setSavingTier(null);
+                              }
+                            }}
+                            disabled={savedTiers.has(pkg.tier) || savingTier === pkg.tier}
+                            className={`w-full mt-2 flex items-center justify-center gap-2 py-2.5 rounded-xl text-sm font-bold transition-all ${
+                              savedTiers.has(pkg.tier)
+                                ? 'bg-green-500/20 text-green-400 border border-green-500/30 cursor-default'
+                                : savingTier === pkg.tier
+                                ? 'bg-gold-500/10 text-gold-400/50 border border-gold-500/20 cursor-wait'
+                                : 'bg-gold-500/20 text-gold-400 border border-gold-500/30 hover:bg-gold-500/30 hover:scale-[1.02]'
+                            }`}
+                          >
+                            {savedTiers.has(pkg.tier) ? (
+                              <><FiCheck className="w-4 h-4" /> Trip Saved</>
+                            ) : savingTier === pkg.tier ? (
+                              <>Saving...</>
+                            ) : (
+                              <><FiHeart className="w-4 h-4" /> Save Trip</>
+                            )}
+                          </button>
+                        )}
                       </div>
 
                       {/* Expandable itinerary */}

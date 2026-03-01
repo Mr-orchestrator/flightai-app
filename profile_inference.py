@@ -1,60 +1,219 @@
 """
 Profile Intelligence Engine — Rule-Based User Inference
-Deterministic inference from user travel history and preferences.
+Deterministic inference from user booking history and engagement signals.
 Runs BEFORE Amadeus calls, AFTER NLP extraction.
 No LLM involvement.
+
+Signal hierarchy:
+  STRONG (1.0): BookingHistory — explicit "Save Trip" action
+  MEDIUM (0.4): EngagementSignal — tier expand/view
+  WEAK   (0.0): TravelHistory — search only (analytics, not used for inference)
 
 Priority order: Explicit user input > NLP extraction > Profile defaults
 """
 
+import math
 import logging
 from datetime import datetime, timedelta
-from collections import Counter
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# MVP gateway mapping — configurable, easy to extract to config/DB later
+
+# ---------------------------------------------------------------------------
+# Helpers: Timestamp parsing, recency weighting, weighted counter
+# ---------------------------------------------------------------------------
+
+def _parse_timestamp(ts) -> Optional[datetime]:
+    """Parse a timestamp from string or datetime."""
+    if isinstance(ts, datetime):
+        return ts
+    if isinstance(ts, str):
+        try:
+            return datetime.fromisoformat(ts)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _recency_weight(timestamp_str) -> float:
+    """
+    Exponential decay weight based on time since event.
+    Half-life ~7 months.
+    0 months: 1.0, 6 months: 0.55, 12 months: 0.30, 24 months: 0.09
+    """
+    if not timestamp_str:
+        return 0.5  # Unknown date gets middle-ground weight
+    ts = _parse_timestamp(timestamp_str)
+    if not ts:
+        return 0.5
+    months_ago = max((datetime.utcnow() - ts).days / 30.0, 0)
+    return math.exp(-0.1 * months_ago)
+
+
+def _compute_weight(entry: dict) -> float:
+    """
+    Two-factor weight: recency × signal_strength.
+    BookingHistory entries have signal_strength=1.0.
+    EngagementSignal entries have signal_strength=0.4.
+    """
+    recency = _recency_weight(entry.get("booked_at") or entry.get("searched_at"))
+    strength = entry.get("signal_strength", 1.0)
+    return recency * strength
+
+
+def _weighted_counter(items: list[tuple]) -> Optional[str]:
+    """
+    Return the key with highest total weight.
+    Items: [(value, weight), ...]
+    """
+    if not items:
+        return None
+    weights: dict = {}
+    for value, weight in items:
+        if value is not None:
+            key = str(value)
+            weights[key] = weights.get(key, 0.0) + weight
+    return max(weights, key=weights.get) if weights else None
+
+
+def _weighted_top_n(items: list[tuple], n: int = 3) -> list[str]:
+    """
+    Return top N keys by total weight.
+    Items: [(value, weight), ...]
+    """
+    if not items:
+        return []
+    weights: dict = {}
+    for value, weight in items:
+        if value:
+            weights[value] = weights.get(value, 0.0) + weight
+    sorted_keys = sorted(weights, key=weights.get, reverse=True)
+    return sorted_keys[:n]
+
+
+# ---------------------------------------------------------------------------
+# Multi-candidate country gateway mapping
+# ---------------------------------------------------------------------------
+
 COUNTRY_GATEWAYS = {
     # Asia
-    "India": "DEL", "Thailand": "BKK", "Japan": "NRT", "Singapore": "SIN",
-    "Malaysia": "KUL", "Indonesia": "DPS", "Vietnam": "SGN", "Philippines": "MNL",
-    "South Korea": "ICN", "China": "PEK", "Hong Kong": "HKG", "Sri Lanka": "CMB",
-    "Maldives": "MLE",
+    "India": ["DEL", "BOM", "BLR", "MAA", "HYD", "CCU"],
+    "Thailand": ["BKK", "CNX", "HKT"],
+    "Japan": ["NRT", "KIX", "HND"],
+    "Singapore": ["SIN"],
+    "Malaysia": ["KUL", "PEN", "LGK"],
+    "Indonesia": ["DPS", "CGK"],
+    "Vietnam": ["SGN", "HAN", "DAD"],
+    "Philippines": ["MNL", "CEB"],
+    "South Korea": ["ICN", "PUS"],
+    "China": ["PEK", "PVG", "CAN"],
+    "Hong Kong": ["HKG"],
+    "Sri Lanka": ["CMB"],
+    "Maldives": ["MLE"],
     # Middle East
-    "UAE": "DXB", "Dubai": "DXB", "Qatar": "DOH", "Oman": "MCT",
-    "Bahrain": "BAH", "Saudi Arabia": "RUH",
+    "UAE": ["DXB", "AUH"],
+    "Dubai": ["DXB"],
+    "Qatar": ["DOH"],
+    "Oman": ["MCT"],
+    "Bahrain": ["BAH"],
+    "Saudi Arabia": ["RUH", "JED"],
     # Europe
-    "UK": "LHR", "England": "LHR", "France": "CDG", "Germany": "FRA",
-    "Netherlands": "AMS", "Italy": "FCO", "Spain": "BCN", "Turkey": "IST",
-    "Switzerland": "ZRH", "Austria": "VIE",
+    "UK": ["LHR", "MAN", "EDI", "LGW"],
+    "England": ["LHR", "MAN", "LGW"],
+    "France": ["CDG", "NCE", "LYS"],
+    "Germany": ["FRA", "MUC", "TXL"],
+    "Netherlands": ["AMS"],
+    "Italy": ["FCO", "MXP", "VCE"],
+    "Spain": ["BCN", "MAD", "PMI"],
+    "Turkey": ["IST", "SAW", "AYT"],
+    "Switzerland": ["ZRH", "GVA"],
+    "Austria": ["VIE"],
     # Americas
-    "USA": "JFK", "Canada": "YYZ", "United States": "JFK",
+    "USA": ["JFK", "LAX", "ORD", "MIA", "SFO", "DEN", "ATL"],
+    "United States": ["JFK", "LAX", "ORD", "MIA", "SFO", "DEN", "ATL"],
+    "Canada": ["YYZ", "YVR", "YUL", "YYC"],
     # Oceania
-    "Australia": "SYD", "New Zealand": "AKL",
+    "Australia": ["SYD", "MEL", "BNE", "PER"],
+    "New Zealand": ["AKL", "CHC", "WLG"],
     # Africa
-    "South Africa": "JNB", "Egypt": "CAI", "Kenya": "NBO",
+    "South Africa": ["JNB", "CPT"],
+    "Egypt": ["CAI", "HRG"],
+    "Kenya": ["NBO", "MBA"],
 }
 
 # Interest-to-gateway overrides (when interest conflicts with default gateway)
 INTEREST_GATEWAY_OVERRIDES = {
     "Canada": {
-        "skiing": "YYC",    # Calgary for skiing
-        "snow": "YYC",
-        "winter sports": "YYC",
-        "nature": "YVR",    # Vancouver for nature
-        "mountains": "YVR",
+        "skiing": "YYC", "snow": "YYC", "winter sports": "YYC",
+        "nature": "YVR", "mountains": "YVR",
     },
     "USA": {
-        "beach": "MIA",     # Miami for beach
-        "skiing": "DEN",    # Denver for skiing
-        "tech": "SFO",      # SF for tech
-        "entertainment": "LAX",
+        "beach": "MIA", "skiing": "DEN", "tech": "SFO",
+        "entertainment": "LAX", "nightlife": "LAX",
     },
     "Australia": {
-        "beach": "OOL",     # Gold Coast for beach
-        "nature": "CNS",    # Cairns for nature/reef
+        "beach": "OOL", "nature": "CNS",
     },
+    "Thailand": {
+        "beach": "HKT", "culture": "CNX", "history": "CNX",
+    },
+    "Japan": {
+        "culture": "KIX", "history": "KIX",   # Osaka/Kyoto
+    },
+    "Spain": {
+        "beach": "PMI",  # Mallorca
+    },
+    "Italy": {
+        "shopping": "MXP", "fashion": "MXP",  # Milan
+    },
+    "Turkey": {
+        "beach": "AYT",  # Antalya
+    },
+    "South Africa": {
+        "nature": "CPT", "beach": "CPT",  # Cape Town
+    },
+    "Indonesia": {
+        "culture": "CGK",  # Jakarta for culture
+    },
+}
+
+# Origin region → country → preferred gateway (static route-awareness heuristic)
+ORIGIN_ROUTE_AFFINITY = {
+    ("IN", "Canada"): "YYZ",     # BOM/DEL → Toronto (direct Air Canada/AI)
+    ("IN", "USA"): "JFK",        # BOM/DEL → JFK (direct flights)
+    ("IN", "UK"): "LHR",         # BOM/DEL → Heathrow (direct AI/BA/VS)
+    ("IN", "Australia"): "SYD",  # BOM → Sydney (direct AI)
+    ("IN", "Japan"): "NRT",      # BOM → Narita
+    ("IN", "Thailand"): "BKK",   # BOM → Bangkok (direct)
+    ("IN", "Singapore"): "SIN",  # BOM → Singapore (direct)
+    ("ME", "UK"): "LHR",         # DXB → Heathrow (Emirates hub)
+    ("ME", "USA"): "JFK",        # DXB → JFK (Emirates)
+    ("US", "Japan"): "NRT",      # LAX/SFO → Narita
+    ("US", "UK"): "LHR",         # JFK → Heathrow
+    ("EU", "Thailand"): "BKK",   # European hubs → Bangkok
+    ("EU", "USA"): "JFK",        # EU → JFK
+    ("APAC", "Australia"): "SYD",  # Singapore/BKK → Sydney
+}
+
+IATA_TO_REGION = {
+    # India
+    "BOM": "IN", "DEL": "IN", "BLR": "IN", "MAA": "IN", "HYD": "IN",
+    "CCU": "IN", "GOI": "IN", "COK": "IN", "AMD": "IN", "PNQ": "IN",
+    # Middle East
+    "DXB": "ME", "DOH": "ME", "AUH": "ME", "RUH": "ME", "JED": "ME",
+    "MCT": "ME", "BAH": "ME",
+    # Americas
+    "JFK": "US", "LAX": "US", "ORD": "US", "SFO": "US", "MIA": "US",
+    "DEN": "US", "ATL": "US", "YYZ": "US", "YVR": "US", "YUL": "US",
+    # Europe
+    "LHR": "EU", "CDG": "EU", "FRA": "EU", "AMS": "EU", "FCO": "EU",
+    "BCN": "EU", "MAD": "EU", "IST": "EU", "MUC": "EU", "ZRH": "EU",
+    "VIE": "EU", "MAN": "EU",
+    # Asia-Pacific
+    "SIN": "APAC", "BKK": "APAC", "HKG": "APAC", "NRT": "APAC",
+    "KIX": "APAC", "ICN": "APAC", "PEK": "APAC", "PVG": "APAC",
+    "KUL": "APAC", "DPS": "APAC", "MNL": "APAC", "SGN": "APAC",
 }
 
 # City name to IATA mapping (for resolving preferred_destinations stored as names)
@@ -70,20 +229,26 @@ CITY_NAME_TO_IATA = {
     # Southeast Asia
     "Singapore": "SIN", "Bangkok": "BKK", "Kuala Lumpur": "KUL",
     "Hong Kong": "HKG", "Ho Chi Minh City": "SGN", "Hanoi": "HAN",
-    "Manila": "MNL", "Bali": "DPS",
+    "Manila": "MNL", "Bali": "DPS", "Phuket": "HKT", "Chiang Mai": "CNX",
     # East Asia
     "Tokyo": "NRT", "Seoul": "ICN", "Beijing": "PEK", "Shanghai": "PVG",
+    "Osaka": "KIX",
     # Europe
     "London": "LHR", "Paris": "CDG", "Frankfurt": "FRA", "Amsterdam": "AMS",
     "Rome": "FCO", "Barcelona": "BCN", "Madrid": "MAD", "Istanbul": "IST",
-    "Zurich": "ZRH", "Vienna": "VIE", "Munich": "MUC",
+    "Zurich": "ZRH", "Vienna": "VIE", "Munich": "MUC", "Milan": "MXP",
+    "Nice": "NCE", "Venice": "VCE", "Edinburgh": "EDI", "Manchester": "MAN",
+    "Geneva": "GVA",
     # Americas
     "New York": "JFK", "Los Angeles": "LAX", "San Francisco": "SFO",
-    "Chicago": "ORD", "Toronto": "YYZ",
+    "Chicago": "ORD", "Miami": "MIA", "Toronto": "YYZ", "Vancouver": "YVR",
+    "Montreal": "YUL",
     # Oceania
-    "Sydney": "SYD", "Melbourne": "MEL",
+    "Sydney": "SYD", "Melbourne": "MEL", "Brisbane": "BNE", "Perth": "PER",
+    "Auckland": "AKL",
     # Africa
-    "Johannesburg": "JNB", "Cairo": "CAI", "Nairobi": "NBO",
+    "Johannesburg": "JNB", "Cape Town": "CPT", "Cairo": "CAI",
+    "Nairobi": "NBO",
     # Island
     "Maldives": "MLE", "Male": "MLE", "Colombo": "CMB",
 }
@@ -92,65 +257,98 @@ CITY_NAME_TO_IATA = {
 IATA_TO_COUNTRY = {
     "YYZ": "Canada", "YVR": "Canada", "YYC": "Canada", "YUL": "Canada",
     "JFK": "USA", "LAX": "USA", "SFO": "USA", "ORD": "USA", "MIA": "USA",
-    "LHR": "UK", "CDG": "France", "FRA": "Germany", "AMS": "Netherlands",
-    "FCO": "Italy", "BCN": "Spain", "MAD": "Spain", "IST": "Turkey",
-    "DXB": "UAE", "DOH": "Qatar", "BKK": "Thailand", "SIN": "Singapore",
-    "NRT": "Japan", "ICN": "South Korea", "SYD": "Australia", "MEL": "Australia",
+    "DEN": "USA", "ATL": "USA",
+    "LHR": "UK", "MAN": "UK", "EDI": "UK", "LGW": "UK",
+    "CDG": "France", "NCE": "France", "LYS": "France",
+    "FRA": "Germany", "MUC": "Germany", "TXL": "Germany",
+    "AMS": "Netherlands",
+    "FCO": "Italy", "MXP": "Italy", "VCE": "Italy",
+    "BCN": "Spain", "MAD": "Spain", "PMI": "Spain",
+    "IST": "Turkey", "SAW": "Turkey", "AYT": "Turkey",
+    "ZRH": "Switzerland", "GVA": "Switzerland",
+    "VIE": "Austria",
+    "DXB": "UAE", "AUH": "UAE",
+    "DOH": "Qatar", "MCT": "Oman", "BAH": "Bahrain",
+    "RUH": "Saudi Arabia", "JED": "Saudi Arabia",
+    "BKK": "Thailand", "CNX": "Thailand", "HKT": "Thailand",
+    "SIN": "Singapore",
+    "NRT": "Japan", "KIX": "Japan", "HND": "Japan",
+    "ICN": "South Korea", "PUS": "South Korea",
+    "SYD": "Australia", "MEL": "Australia", "BNE": "Australia", "PER": "Australia",
+    "AKL": "New Zealand", "CHC": "New Zealand", "WLG": "New Zealand",
     "DEL": "India", "BOM": "India", "BLR": "India", "MAA": "India",
     "HYD": "India", "CCU": "India", "GOI": "India", "COK": "India",
-    "DPS": "Indonesia", "SGN": "Vietnam", "HAN": "Vietnam",
-    "MLE": "Maldives", "CMB": "Sri Lanka", "JNB": "South Africa",
-    "CAI": "Egypt", "NBO": "Kenya", "PEK": "China", "PVG": "China",
-    "HKG": "Hong Kong", "KUL": "Malaysia", "MNL": "Philippines",
-    "BAH": "Bahrain", "MCT": "Oman", "RUH": "Saudi Arabia",
-    "ZRH": "Switzerland", "VIE": "Austria", "MUC": "Germany",
+    "DPS": "Indonesia", "CGK": "Indonesia",
+    "SGN": "Vietnam", "HAN": "Vietnam", "DAD": "Vietnam",
+    "MNL": "Philippines", "CEB": "Philippines",
+    "KUL": "Malaysia", "PEN": "Malaysia", "LGK": "Malaysia",
+    "PEK": "China", "PVG": "China", "CAN": "China",
+    "HKG": "Hong Kong",
+    "MLE": "Maldives", "CMB": "Sri Lanka",
+    "JNB": "South Africa", "CPT": "South Africa",
+    "CAI": "Egypt", "HRG": "Egypt",
+    "NBO": "Kenya", "MBA": "Kenya",
 }
 
 
+# ---------------------------------------------------------------------------
+# Profile Strength
+# ---------------------------------------------------------------------------
+
 def compute_profile_strength(travel_history: list[dict]) -> int:
     """
-    Compute profile confidence score.
+    Compute profile confidence score from booking/engagement history.
     Only apply full inference if strength >= 2.
 
-    +1 if at least one trip within last 24 months
-    +1 if total trip count >= 3
+    +1 if at least 3 entries within last 36 months
+    +1 if any entry within last 24 months
     """
     strength = 0
-    if len(travel_history) >= 3:
-        strength += 1
+    cutoff_36mo = datetime.utcnow() - timedelta(days=1095)
+    cutoff_24mo = datetime.utcnow() - timedelta(days=730)
 
-    cutoff = datetime.utcnow() - timedelta(days=730)  # 24 months
-    for trip in travel_history:
-        searched_at = trip.get("searched_at")
-        if searched_at:
-            if isinstance(searched_at, str):
-                try:
-                    searched_at = datetime.fromisoformat(searched_at)
-                except (ValueError, TypeError):
-                    continue
-            if searched_at > cutoff:
-                strength += 1
-                break
+    recent_entries = []
+    has_recent_24mo = False
+
+    for entry in travel_history:
+        ts = _parse_timestamp(entry.get("booked_at") or entry.get("searched_at"))
+        if ts:
+            if ts > cutoff_36mo:
+                recent_entries.append(entry)
+            if ts > cutoff_24mo:
+                has_recent_24mo = True
+
+    if len(recent_entries) >= 3:
+        strength += 1
+    if has_recent_24mo:
+        strength += 1
 
     return strength
 
+
+# ---------------------------------------------------------------------------
+# Inference Functions (all use weighted counters from booking history)
+# ---------------------------------------------------------------------------
 
 def infer_origin(
     travel_history: list[dict],
     user_home_airport: Optional[str] = None,
 ) -> tuple[str, str]:
     """
-    Infer departure airport.
-    Returns: (iata_code, source) where source is "home_airport"|"history"|"default"
+    Infer departure airport using recency-weighted booking history.
+    Returns: (iata_code, source)
     """
     if user_home_airport:
         return user_home_airport, "home_airport"
 
     if travel_history:
-        origins = [t.get("origin_iata") for t in travel_history if t.get("origin_iata")]
-        if origins:
-            most_common = Counter(origins).most_common(1)[0][0]
-            return most_common, "history"
+        weighted = [
+            (t["origin_iata"], _compute_weight(t))
+            for t in travel_history if t.get("origin_iata")
+        ]
+        result = _weighted_counter(weighted)
+        if result:
+            return result, "history"
 
     return "BOM", "default"
 
@@ -159,11 +357,11 @@ def infer_destination(
     travel_history: list[dict],
     nlp_intent: dict,
     user_prefs: Optional[dict] = None,
+    origin_iata: Optional[str] = None,
 ) -> tuple[Optional[str], Optional[str], str]:
     """
-    Resolve destination IATA code.
+    Resolve destination IATA code with multi-candidate airport selection.
     Returns: (destination_city, destination_iata, source)
-    Source: "explicit"|"nlp_city"|"history_country"|"interest_override"|"gateway"|"preferred"|None
     """
     # Priority 1: NLP extracted specific city with IATA
     if nlp_intent.get("destination_iata"):
@@ -172,45 +370,19 @@ def infer_destination(
     # Priority 2: NLP extracted destination name (might be country or city)
     destination = nlp_intent.get("destination")
     if destination:
-        # Check if it's a country
         country_key = destination.strip().title()
         if country_key in COUNTRY_GATEWAYS:
-            # It's a country — check history first
-            interests = nlp_intent.get("interests", [])
+            gateway = _resolve_country_gateway(
+                country_key, travel_history, nlp_intent, origin_iata
+            )
+            return destination, gateway[0], gateway[1]
 
-            # Check interest-based gateway override
-            if country_key in INTEREST_GATEWAY_OVERRIDES and interests:
-                for interest in interests:
-                    interest_lower = interest.lower()
-                    overrides = INTEREST_GATEWAY_OVERRIDES[country_key]
-                    if interest_lower in overrides:
-                        iata = overrides[interest_lower]
-                        return destination, iata, "interest_override"
-
-            # Check user history for past trips to this country
-            if travel_history:
-                country_trips = []
-                for trip in travel_history:
-                    dest_iata = trip.get("destination_iata")
-                    if dest_iata and IATA_TO_COUNTRY.get(dest_iata) == country_key:
-                        country_trips.append(dest_iata)
-
-                if country_trips:
-                    # Reuse most visited city in that country
-                    most_visited = Counter(country_trips).most_common(1)[0][0]
-                    return destination, most_visited, "history_country"
-
-            # Fallback to default gateway for that country
-            gateway = COUNTRY_GATEWAYS[country_key]
-            return destination, gateway, "gateway"
-
-        # Not a known country — might be a city name, let IATA extractor handle downstream
+        # Not a known country — might be a city name
         return destination, None, "nlp_city_unresolved"
 
     # Priority 3: Use user's preferred destinations
     if user_prefs and user_prefs.get("preferred_destinations"):
         prefs = user_prefs["preferred_destinations"]
-        # Filter out already-visited destinations
         visited = set()
         for trip in travel_history:
             if trip.get("destination_iata"):
@@ -219,21 +391,75 @@ def infer_destination(
         for pref in prefs:
             pref_stripped = pref.strip()
             pref_upper = pref_stripped.upper()
-            # Check if it's already an IATA code
+            # IATA code
             if len(pref_upper) == 3 and pref_upper not in visited:
                 return pref_stripped, pref_upper, "preferred"
-            # Check if it's a city name — resolve to IATA
+            # City name → IATA
             iata = CITY_NAME_TO_IATA.get(pref_stripped.title())
             if iata and iata not in visited:
                 return pref_stripped, iata, "preferred"
-            # Check if it's a country name — use gateway
+            # Country name → gateway (multi-candidate)
             country_key = pref_stripped.title()
             if country_key in COUNTRY_GATEWAYS:
-                gateway = COUNTRY_GATEWAYS[country_key]
-                if gateway not in visited:
-                    return pref_stripped, gateway, "preferred"
+                gateway = _resolve_country_gateway(
+                    country_key, travel_history, nlp_intent, origin_iata
+                )
+                if gateway[0] not in visited:
+                    return pref_stripped, gateway[0], "preferred"
 
     return None, None, "none"
+
+
+def _resolve_country_gateway(
+    country_key: str,
+    travel_history: list[dict],
+    nlp_intent: dict,
+    origin_iata: Optional[str] = None,
+) -> tuple[str, str]:
+    """
+    Multi-candidate country-to-airport resolution.
+    Selection order:
+    1. Interest overrides
+    2. Recency-weighted booking history for that country
+    3. Route-aware affinity from origin
+    4. Default (first candidate)
+
+    Returns: (iata_code, source)
+    """
+    candidates = COUNTRY_GATEWAYS[country_key]
+    interests = nlp_intent.get("interests", [])
+
+    # Step 1: Interest override
+    if country_key in INTEREST_GATEWAY_OVERRIDES and interests:
+        overrides = INTEREST_GATEWAY_OVERRIDES[country_key]
+        for interest in interests:
+            if interest.lower() in overrides:
+                return overrides[interest.lower()], "interest_override"
+
+    # Step 2: Recency-weighted booking history for this country
+    if travel_history:
+        country_trips = [
+            (trip["destination_iata"], _compute_weight(trip))
+            for trip in travel_history
+            if trip.get("destination_iata") and IATA_TO_COUNTRY.get(trip["destination_iata"]) == country_key
+        ]
+        if country_trips:
+            best = _weighted_counter(country_trips)
+            if best:
+                return best, "history_country"
+
+    # Step 3: Route-aware affinity from origin
+    if origin_iata:
+        region = IATA_TO_REGION.get(origin_iata)
+        if region:
+            affinity_key = (region, country_key)
+            if affinity_key in ORIGIN_ROUTE_AFFINITY:
+                preferred = ORIGIN_ROUTE_AFFINITY[affinity_key]
+                if preferred in candidates:
+                    return preferred, "route_affinity"
+
+    # Step 4: Default first candidate
+    return candidates[0], "gateway"
 
 
 def infer_duration(
@@ -241,57 +467,64 @@ def infer_duration(
     nlp_intent: dict,
 ) -> tuple[int, str]:
     """
-    Infer trip duration.
+    Infer trip duration using weighted median from booking history.
     Returns: (days, source)
     """
-    # Priority 1: NLP extracted duration
     if nlp_intent.get("duration_days"):
         return nlp_intent["duration_days"], "nlp"
 
-    # Priority 2: Median from user history
     if travel_history:
-        durations = [
-            t["duration_days"] for t in travel_history
+        entries = [
+            (t["duration_days"], _compute_weight(t))
+            for t in travel_history
             if t.get("duration_days") and t["duration_days"] > 0
         ]
-        if durations:
-            durations.sort()
-            median = durations[len(durations) // 2]
-            return median, "history"
+        if entries:
+            # Weighted median: sort by duration, find 50th percentile by weight
+            entries.sort(key=lambda x: x[0])
+            total_weight = sum(w for _, w in entries)
+            if total_weight > 0:
+                cumulative = 0
+                for dur, w in entries:
+                    cumulative += w
+                    if cumulative >= total_weight / 2:
+                        return dur, "history"
 
     return 7, "default"
 
 
 def infer_cabin(travel_history: list[dict]) -> tuple[str, str]:
     """
-    Infer preferred cabin class from history.
+    Infer preferred cabin class from recency-weighted booking history.
     Returns: (cabin_class, source)
     """
     if travel_history:
-        cabins = [
-            t.get("cabin_class") for t in travel_history
-            if t.get("cabin_class")
+        weighted = [
+            (t.get("cabin_class"), _compute_weight(t))
+            for t in travel_history if t.get("cabin_class")
         ]
-        if cabins:
-            most_common = Counter(cabins).most_common(1)[0][0]
-            return most_common, "history"
+        if weighted:
+            result = _weighted_counter(weighted)
+            if result:
+                return result, "history"
 
     return "ECONOMY", "default"
 
 
 def infer_hotel_preference(travel_history: list[dict]) -> tuple[int, str]:
     """
-    Infer preferred hotel star rating.
+    Infer preferred hotel star rating from recency-weighted booking history.
     Returns: (star_rating, source)
     """
     if travel_history:
-        ratings = [
-            t.get("hotel_star_rating") for t in travel_history
-            if t.get("hotel_star_rating")
+        weighted = [
+            (t.get("hotel_star_rating"), _compute_weight(t))
+            for t in travel_history if t.get("hotel_star_rating")
         ]
-        if ratings:
-            most_common = Counter(ratings).most_common(1)[0][0]
-            return most_common, "history"
+        if weighted:
+            result = _weighted_counter(weighted)
+            if result:
+                return int(result), "history"
 
     return 4, "default"
 
@@ -301,25 +534,40 @@ def infer_airline_preference(
     user_prefs: Optional[dict] = None,
 ) -> tuple[list[str], str]:
     """
-    Infer preferred airlines.
+    Infer preferred airlines from recency-weighted booking history.
     Returns: (carrier_codes, source)
     """
     # Priority 1: Explicit user preferences
     if user_prefs and user_prefs.get("preferred_airlines"):
         return user_prefs["preferred_airlines"], "preferences"
 
-    # Priority 2: Top 3 most-used carriers from history
+    # Priority 2: Top 3 recency-weighted carriers from history
     if travel_history:
-        carriers = [
-            t.get("carrier") for t in travel_history
-            if t.get("carrier")
-        ]
-        if carriers:
-            top_3 = [code for code, _ in Counter(carriers).most_common(3)]
-            return top_3, "history"
+        weighted_items = []
+        for t in travel_history:
+            weight = _compute_weight(t)
+            # BookingHistory may have carrier_codes (list)
+            codes = t.get("carrier_codes") or []
+            if isinstance(codes, list):
+                for code in codes:
+                    if code:
+                        weighted_items.append((code, weight))
+            # Also check single carrier field
+            carrier = t.get("carrier")
+            if carrier:
+                weighted_items.append((carrier, weight))
+
+        if weighted_items:
+            top_3 = _weighted_top_n(weighted_items, n=3)
+            if top_3:
+                return top_3, "history"
 
     return [], "default"
 
+
+# ---------------------------------------------------------------------------
+# Master Resolver
+# ---------------------------------------------------------------------------
 
 def resolve_all(
     travel_history: list[dict],
@@ -336,6 +584,9 @@ def resolve_all(
     Master resolver: combines explicit input, NLP extraction, and profile inference.
     Priority: Explicit > NLP > Profile > Default
 
+    travel_history should contain BookingHistory + EngagementSignal entries,
+    each tagged with signal_strength (1.0 for bookings, 0.4 for engagement).
+
     Returns resolved dict with all travel parameters + inference sources for logging.
     """
     profile_strength = compute_profile_strength(travel_history)
@@ -344,6 +595,8 @@ def resolve_all(
     inference_log = {
         "profile_strength": profile_strength,
         "use_full_profile": use_full_profile,
+        "booking_count": sum(1 for t in travel_history if t.get("signal_strength", 1.0) >= 1.0),
+        "engagement_count": sum(1 for t in travel_history if t.get("signal_strength", 1.0) < 1.0),
     }
 
     # --- Origin ---
@@ -352,7 +605,8 @@ def resolve_all(
     elif use_full_profile:
         origin, origin_source = infer_origin(travel_history, user_home_airport)
     else:
-        origin, origin_source = user_home_airport or "BOM", "home_airport" if user_home_airport else "default"
+        origin = user_home_airport or "BOM"
+        origin_source = "home_airport" if user_home_airport else "default"
     inference_log["origin_source"] = origin_source
 
     # --- Destination ---
@@ -361,24 +615,19 @@ def resolve_all(
         dest_iata = explicit_destination_iata
         dest_source = "explicit"
     elif explicit_destination:
-        # Explicit city name but no IATA — let NLP/profile resolve IATA
         nlp_with_dest = {**nlp_intent, "destination": explicit_destination}
-        if use_full_profile:
-            dest_city, dest_iata, dest_source = infer_destination(
-                travel_history, nlp_with_dest, user_prefs
-            )
-        else:
-            dest_city, dest_iata, dest_source = infer_destination(
-                [], nlp_with_dest, user_prefs
-            )
+        history_for_dest = travel_history if use_full_profile else []
+        dest_city, dest_iata, dest_source = infer_destination(
+            history_for_dest, nlp_with_dest, user_prefs, origin_iata=origin
+        )
         dest_source = f"explicit_name+{dest_source}"
     elif use_full_profile:
         dest_city, dest_iata, dest_source = infer_destination(
-            travel_history, nlp_intent, user_prefs
+            travel_history, nlp_intent, user_prefs, origin_iata=origin
         )
     else:
         dest_city, dest_iata, dest_source = infer_destination(
-            [], nlp_intent, user_prefs
+            [], nlp_intent, user_prefs, origin_iata=origin
         )
     inference_log["destination_source"] = dest_source
 
@@ -396,7 +645,7 @@ def resolve_all(
     budget_source = "explicit" if explicit_budget else ("nlp" if budget else "none")
     inference_log["budget_source"] = budget_source
 
-    # --- Cabin (profile only, no explicit/NLP field for this) ---
+    # --- Cabin ---
     if use_full_profile:
         cabin, cabin_source = infer_cabin(travel_history)
     else:
@@ -417,7 +666,6 @@ def resolve_all(
         airlines, airline_source = [], "default"
     inference_log["airline_source"] = airline_source
 
-    # Log inference decisions
     logger.info(f"Profile inference: {inference_log}")
 
     return {

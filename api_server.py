@@ -24,7 +24,10 @@ from iata_extractor import extract_iata_from_query, get_indian_airports_list
 from amadeus_flights import AmadeusFlightSearch, get_airline_name, get_airline_website
 
 # Import new modules
-from database import init_db, async_session, User, TravelHistory, UserPreferences, PackageSnapshot
+from database import (
+    init_db, async_session, User, TravelHistory, UserPreferences,
+    PackageSnapshot, BookingHistory, EngagementSignal,
+)
 from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, get_optional_user
@@ -227,6 +230,26 @@ class TravelHistoryResponse(BaseModel):
     query_text: Optional[str]
     searched_at: str
 
+class BookPackageRequest(BaseModel):
+    tier: str  # budget / standard / premium
+    origin_iata: str
+    destination_iata: str
+    destination_city: Optional[str] = None
+    duration_days: Optional[int] = None
+    cabin_class: Optional[str] = None
+    hotel_star_rating: Optional[int] = None
+    carrier_codes: Optional[List[str]] = None
+    hotel_name: Optional[str] = None
+    total_price_inr: Optional[int] = None
+    package_snapshot_id: Optional[str] = None
+
+class TrackEngagementRequest(BaseModel):
+    signal_type: str  # "tier_expand" | "tier_view"
+    destination_iata: Optional[str] = None
+    tier: Optional[str] = None
+    cabin_class: Optional[str] = None
+    hotel_star_rating: Optional[int] = None
+
 
 # ==================== AUTH ENDPOINTS ====================
 
@@ -330,6 +353,70 @@ async def get_travel_history(current_user: dict = Depends(get_current_user)):
             )
             for h in history
         ]
+
+
+# ==================== BOOKING + ENGAGEMENT ENDPOINTS ====================
+
+@app.post("/book-package")
+async def book_package(
+    request: BookPackageRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Save a trip booking — primary signal for personalization (weight: 1.0)."""
+    try:
+        async with async_session() as session:
+            booking = BookingHistory(
+                user_id=current_user["user_id"],
+                origin_iata=request.origin_iata,
+                destination_iata=request.destination_iata,
+                destination_city=request.destination_city,
+                duration_days=request.duration_days,
+                cabin_class=request.cabin_class,
+                hotel_star_rating=request.hotel_star_rating,
+                carrier_codes=request.carrier_codes or [],
+                hotel_name=request.hotel_name,
+                total_price_inr=request.total_price_inr,
+                tier_selected=request.tier,
+                package_snapshot_id=request.package_snapshot_id,
+                booked_at=datetime.utcnow(),
+            )
+            session.add(booking)
+            await session.commit()
+            await session.refresh(booking)
+
+        return {"success": True, "booking_id": booking.id}
+
+    except Exception as e:
+        logger.exception("Error saving booking")
+        raise HTTPException(status_code=500, detail=f"Error saving booking: {str(e)}")
+
+
+@app.post("/track-engagement")
+async def track_engagement(
+    request: TrackEngagementRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Track implicit engagement signal — secondary signal for personalization (weight: 0.4)."""
+    try:
+        async with async_session() as session:
+            signal = EngagementSignal(
+                user_id=current_user["user_id"],
+                signal_type=request.signal_type,
+                destination_iata=request.destination_iata,
+                tier=request.tier,
+                cabin_class=request.cabin_class,
+                hotel_star_rating=request.hotel_star_rating,
+                created_at=datetime.utcnow(),
+            )
+            session.add(signal)
+            await session.commit()
+
+        return {"success": True}
+
+    except Exception as e:
+        # Fire-and-forget — log but don't fail the request
+        logger.warning(f"Engagement tracking failed: {e}")
+        return {"success": False, "error": str(e)}
 
 
 # ==================== NLP + PERSONALIZATION ENDPOINTS ====================
@@ -437,36 +524,80 @@ async def save_preferences(
 # ==================== AUTO PACKAGE HELPERS ====================
 
 async def _load_user_context(user_id: str):
-    """Load travel history, preferences, and user record for an authenticated user."""
-    async with async_session() as session:
-        result = await session.execute(
-            select(TravelHistory)
-            .where(TravelHistory.user_id == user_id)
-            .order_by(TravelHistory.searched_at.desc())
-            .limit(10)
-        )
-        history_rows = result.scalars().all()
+    """
+    Load user context for personalization.
 
+    Signal hierarchy:
+      STRONG (1.0): BookingHistory — explicit "Save Trip" action
+      MEDIUM (0.4): EngagementSignal — tier expand/view
+      WEAK   (0.0): TravelHistory — search only (analytics, not used for inference)
+
+    Returns: (history_dicts, prefs_dict, home_airport)
+    history_dicts merges BookingHistory + EngagementSignal, each tagged with signal_strength.
+    """
+    async with async_session() as session:
+        # Primary signal: BookingHistory (last 20, most recent first)
+        booking_result = await session.execute(
+            select(BookingHistory)
+            .where(BookingHistory.user_id == user_id)
+            .order_by(BookingHistory.booked_at.desc())
+            .limit(20)
+        )
+        booking_rows = booking_result.scalars().all()
+
+        # Secondary signal: EngagementSignal (last 50, most recent first)
+        engagement_result = await session.execute(
+            select(EngagementSignal)
+            .where(EngagementSignal.user_id == user_id)
+            .order_by(EngagementSignal.created_at.desc())
+            .limit(50)
+        )
+        engagement_rows = engagement_result.scalars().all()
+
+        # User preferences
         pref_result = await session.execute(
             select(UserPreferences).where(UserPreferences.user_id == user_id)
         )
         user_prefs = pref_result.scalar_one_or_none()
 
+        # User record
         user_result = await session.execute(
             select(User).where(User.id == user_id)
         )
         user = user_result.scalar_one_or_none()
 
-    history_dicts = [
-        {
-            "origin_iata": h.origin_iata,
-            "destination_iata": h.destination_iata,
-            "destination_city": h.destination_city,
-            "duration_days": h.duration_days,
-            "searched_at": h.searched_at.isoformat() if h.searched_at else None,
-        }
-        for h in history_rows
-    ]
+    # Build merged history for inference: bookings (weight 1.0) + engagement (weight 0.4)
+    history_dicts = []
+
+    for b in booking_rows:
+        history_dicts.append({
+            "origin_iata": b.origin_iata,
+            "destination_iata": b.destination_iata,
+            "destination_city": b.destination_city,
+            "duration_days": b.duration_days,
+            "cabin_class": b.cabin_class,
+            "hotel_star_rating": b.hotel_star_rating,
+            "carrier_codes": b.carrier_codes or [],
+            "hotel_name": b.hotel_name,
+            "total_price_inr": b.total_price_inr,
+            "tier_selected": b.tier_selected,
+            "booked_at": b.booked_at.isoformat() if b.booked_at else None,
+            "signal_strength": 1.0,
+        })
+
+    for e in engagement_rows:
+        history_dicts.append({
+            "origin_iata": None,
+            "destination_iata": e.destination_iata,
+            "destination_city": None,
+            "duration_days": None,
+            "cabin_class": e.cabin_class,
+            "hotel_star_rating": e.hotel_star_rating,
+            "carrier_codes": [],
+            "tier_selected": e.tier,
+            "booked_at": e.created_at.isoformat() if e.created_at else None,
+            "signal_strength": 0.4,
+        })
 
     prefs_dict = None
     if user_prefs:
@@ -521,7 +652,11 @@ def _resolve_params(request: AutoPackageRequest, nlp_result: dict,
         "travel_style": travel_style,
         "travel_companions": (prefs_dict or {}).get("travel_companions"),
         "accommodation_preference": (prefs_dict or {}).get("accommodation_preference", "hotel"),
-        "preferred_airlines": (prefs_dict or {}).get("preferred_airlines", []),
+        "preferred_airlines": resolved.get("preferred_airlines", (prefs_dict or {}).get("preferred_airlines", [])),
+        # Profile metadata for personalization reasons generation
+        "cabin_preference": resolved.get("cabin_preference"),
+        "hotel_star_preference": resolved.get("hotel_star_preference"),
+        "duration_source": resolved.get("inference_log", {}).get("duration_source"),
     }
 
     return resolved, preferences
@@ -606,8 +741,13 @@ async def get_auto_packages(
             destination_iata=destination_iata,
         )
 
-        # Add inference log to response
+        # Add inference metadata to response
         pkg_result["inference_log"] = resolved.get("inference_log", {})
+        pkg_result["resolved_origin"] = {
+            "iata": origin,
+            "source": resolved.get("inference_log", {}).get("origin_source", "default"),
+        }
+        pkg_result["booking_count"] = resolved.get("inference_log", {}).get("booking_count", 0)
 
         # Save snapshot if authenticated
         if current_user:
@@ -831,8 +971,13 @@ async def get_auto_packages_stream(
                 "step": "validate", "message": "Validating packages...", "percent": 95
             })
 
-            # Add inference log
+            # Add inference metadata
             pkg_result["inference_log"] = resolved.get("inference_log", {})
+            pkg_result["resolved_origin"] = {
+                "iata": origin,
+                "source": resolved.get("inference_log", {}).get("origin_source", "default"),
+            }
+            pkg_result["booking_count"] = resolved.get("inference_log", {}).get("booking_count", 0)
 
             # Save snapshot
             if current_user:
@@ -883,6 +1028,9 @@ async def root():
             "/auth/me",
             "/travel-history",
             "/auto-packages",
+            "/auto-packages-stream",
+            "/book-package",
+            "/track-engagement",
             "/nlp-parse",
             "/onboarding-status",
             "/save-preferences",

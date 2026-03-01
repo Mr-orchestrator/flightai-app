@@ -182,7 +182,7 @@ RETURN ONLY a JSON object:
           "activities": [
             {
               "time": "morning" | "afternoon" | "evening",
-              "activity": "<use activity names from the PROVIDED list>",
+              "activity": "[ACT-N] <activity name from provided list>",
               "estimated_cost_inr": <int from provided data>,
               "data_source": "amadeus" | "suggested"
             }
@@ -199,7 +199,8 @@ RETURN ONLY a JSON object:
 Rules:
 - Create content for exactly 3 packages: budget, standard, premium
 - Use ONLY the activity names provided in the SELECTED ACTIVITIES lists
-- If not enough activities for all days, fill with "Free time / explore the city" marked as "suggested"
+- In daily_itinerary, reference each activity by its [ACT-N] tag AND exact name (e.g. "[ACT-1] Dubai Gold Souk Walking Tour")
+- If not enough activities for all days, fill with "Free time / explore the city" marked as "suggested" (no ACT tag needed for free time)
 - DO NOT invent flights, hotels, or prices
 - DO NOT modify any pricing
 - Each day should have 2-3 activities (morning, afternoon, evening)
@@ -257,8 +258,8 @@ def _build_narrative_prompt(
 
         if sel.activities:
             tiers_text += "SELECTED ACTIVITIES:\n"
-            for act in sel.activities:
-                tiers_text += f"  - {act.name}"
+            for idx, act in enumerate(sel.activities, start=1):
+                tiers_text += f"  - [ACT-{idx}] {act.name}"
                 if act.price_per_person_inr > 0:
                     tiers_text += f" (INR {act.price_per_person_inr:,.0f}/person)"
                 tiers_text += "\n"
