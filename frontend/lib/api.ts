@@ -255,6 +255,14 @@ export interface TravelPackage {
   daily_itinerary: DayItinerary[];
   inclusions: string[];
   highlights: string[];
+  // New pipeline fields
+  flight_offer_id?: string;
+  hotel_offer_id?: string;
+  activity_ids?: string[];
+  flight_price_inr?: number;
+  hotel_total_inr?: number;
+  fx_rate_used?: number;
+  validation_warnings?: string[];
 }
 
 export interface AutoPackageRequest {
@@ -276,13 +284,26 @@ export interface AutoPackageResponse {
   personalization_note: string;
   model_used: string | null;
   used_fallback: boolean;
-  data_quality: 'full_realtime' | 'partial_realtime' | 'estimated';
+  data_quality: 'full_realtime' | 'partial_realtime' | 'estimated' | 'insufficient_data';
+  data_quality_detail?: {
+    flights: string;
+    hotels: string;
+    activities: string;
+    overall: string;
+  };
   error: string | null;
   amadeus_data?: {
     flights_found: number;
     hotels_found: number;
     activities_found: number;
   };
+  tier_totals?: {
+    budget: number;
+    standard: number;
+    premium: number;
+  };
+  validation_warnings?: string[];
+  inference_log?: Record<string, unknown>;
 }
 
 export interface NLPParseRequest {
@@ -316,7 +337,27 @@ export interface SavePreferencesRequest {
   preferred_destinations?: string[];
   travel_companions?: string;
   accommodation_preference?: string;
+  budget_range_min?: number;
+  budget_range_max?: number;
+  travel_frequency?: string;
+  dietary_needs?: string[];
+  accessibility_needs?: string[];
+  preferred_airlines?: string[];
+  onboarding_step?: number;
 }
+
+// ==================== SSE PROGRESS TYPES ====================
+
+export interface ProgressEvent {
+  step: 'nlp' | 'profile' | 'flights' | 'hotels' | 'activities' | 'ai' | 'validate' | 'done';
+  message: string;
+  percent: number;
+}
+
+export type SSEEvent =
+  | { type: 'progress'; data: ProgressEvent }
+  | { type: 'complete'; data: AutoPackageResponse }
+  | { type: 'error'; data: { message: string } };
 
 export interface TravelHistoryItem {
   id: number;
@@ -334,7 +375,9 @@ export const fetchAutoPackages = async (
   request: AutoPackageRequest
 ): Promise<AutoPackageResponse> => {
   try {
-    const response = await api.post<AutoPackageResponse>('/auto-packages', request);
+    const response = await api.post<AutoPackageResponse>('/auto-packages', request, {
+      timeout: 300000, // 5 min — Amadeus + LLM calls take time
+    });
     return response.data;
   } catch (error) {
     console.error('Error generating packages:', error);
@@ -380,6 +423,107 @@ export const savePreferences = async (prefs: SavePreferencesRequest): Promise<{ 
     console.error('Error saving preferences:', error);
     throw new Error('Failed to save preferences');
   }
+};
+
+// ==================== SSE STREAMING CLIENT ====================
+
+/**
+ * Fetch auto packages with real-time progress via Server-Sent Events.
+ * Falls back to the non-streaming endpoint if SSE fails to connect.
+ */
+export const fetchAutoPackagesStream = (
+  request: AutoPackageRequest,
+  onProgress: (event: ProgressEvent) => void,
+  onComplete: (data: AutoPackageResponse) => void,
+  onError: (error: string) => void,
+): (() => void) => {
+  const controller = new AbortController();
+  const token = Cookies.get('flightai_token');
+
+  const run = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-packages-stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE events from buffer
+        const lines = buffer.split('\n');
+        buffer = '';
+
+        let eventType = '';
+        let eventData = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            eventData = line.slice(6);
+          } else if (line === '' && eventType && eventData) {
+            // End of event — process it
+            try {
+              const parsed = JSON.parse(eventData);
+              if (eventType === 'progress') {
+                onProgress(parsed as ProgressEvent);
+              } else if (eventType === 'complete') {
+                onComplete(parsed as AutoPackageResponse);
+              } else if (eventType === 'error') {
+                onError(parsed.message || 'Unknown error');
+              }
+            } catch (parseErr) {
+              console.warn('SSE parse error:', parseErr);
+            }
+            eventType = '';
+            eventData = '';
+          } else if (line !== '') {
+            // Incomplete event, put back in buffer
+            buffer += line + '\n';
+          }
+        }
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        return; // User cancelled
+      }
+      console.error('SSE stream failed, falling back:', err);
+      // Fallback to non-streaming endpoint
+      try {
+        onProgress({ step: 'ai', message: 'Generating packages...', percent: 50 });
+        const result = await fetchAutoPackages(request);
+        onComplete(result);
+      } catch (fallbackErr) {
+        onError(fallbackErr instanceof Error ? fallbackErr.message : 'Failed to generate packages');
+      }
+    }
+  };
+
+  run();
+
+  // Return abort function
+  return () => controller.abort();
 };
 
 export default api;

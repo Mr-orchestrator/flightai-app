@@ -3,6 +3,7 @@ Amadeus Travel API Integration
 Search real-time flights, hotels, and activities using Amadeus APIs
 """
 import os
+import threading
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -96,36 +97,38 @@ class AmadeusFlightSearch:
         self.client_secret = AMADEUS_CLIENT_SECRET
         self.access_token = None
         self.token_expiry = None
-    
+        self._token_lock = threading.Lock()  # Thread-safe for parallel calls
+
     def get_access_token(self):
-        """Get or refresh Amadeus access token"""
-        # Check if token is still valid
-        if self.access_token and self.token_expiry:
-            if datetime.now() < self.token_expiry:
+        """Get or refresh Amadeus access token (thread-safe)."""
+        with self._token_lock:
+            # Check if token is still valid
+            if self.access_token and self.token_expiry:
+                if datetime.now() < self.token_expiry:
+                    return self.access_token
+
+            # Get new token
+            try:
+                response = requests.post(
+                    AMADEUS_AUTH_URL,
+                    data={
+                        'grant_type': 'client_credentials',
+                        'client_id': self.client_id,
+                        'client_secret': self.client_secret
+                    },
+                    timeout=10
+                )
+                response.raise_for_status()
+
+                data = response.json()
+                self.access_token = data['access_token']
+                expires_in = data.get('expires_in', 1800)  # default 30 min
+                self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
+
                 return self.access_token
-        
-        # Get new token
-        try:
-            response = requests.post(
-                AMADEUS_AUTH_URL,
-                data={
-                    'grant_type': 'client_credentials',
-                    'client_id': self.client_id,
-                    'client_secret': self.client_secret
-                },
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            self.access_token = data['access_token']
-            expires_in = data.get('expires_in', 1800)  # default 30 min
-            self.token_expiry = datetime.now() + timedelta(seconds=expires_in - 60)
-            
-            return self.access_token
-            
-        except Exception as e:
-            raise Exception(f"Failed to get Amadeus access token: {str(e)}")
+
+            except Exception as e:
+                raise Exception(f"Failed to get Amadeus access token: {str(e)}")
     
     def search_flights(self, origin, destination, departure_date, return_date=None, 
                       adults=1, max_results=10, currency="INR", travel_class=None, non_stop=False):
@@ -685,6 +688,40 @@ class AmadeusFlightSearch:
     def get_city_coordinates(iata_code):
         """Get lat/lon coordinates for a city by IATA code."""
         return CITY_COORDINATES.get(iata_code.upper())
+
+    def get_city_coordinates_with_fallback(self, iata_code):
+        """Get coordinates from hardcoded dict, falling back to Amadeus Location API."""
+        coords = CITY_COORDINATES.get(iata_code.upper())
+        if coords:
+            return coords
+
+        # Fallback: use Amadeus Airport/City search API
+        try:
+            token = self.get_access_token()
+            resp = requests.get(
+                f"{AMADEUS_BASE_URL}/v1/reference-data/locations",
+                params={"keyword": iata_code, "subType": "CITY,AIRPORT"},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json().get("data", [])
+                if data:
+                    geo = data[0].get("geoCode", {})
+                    city_name = data[0].get("address", {}).get("cityName", iata_code)
+                    result = {
+                        "lat": geo.get("latitude"),
+                        "lon": geo.get("longitude"),
+                        "city": city_name,
+                    }
+                    if result["lat"] and result["lon"]:
+                        # Cache for future use
+                        CITY_COORDINATES[iata_code.upper()] = result
+                        return result
+        except Exception:
+            pass
+
+        return None
 
     @staticmethod
     def get_city_name(iata_code):

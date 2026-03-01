@@ -6,11 +6,16 @@ Exposes endpoints for Next.js frontend
 
 from fastapi import FastAPI, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timedelta
 import os
 import uuid
+import json
+import asyncio
+import time
+import logging
 from dotenv import load_dotenv
 
 # Import existing backend modules
@@ -19,15 +24,61 @@ from iata_extractor import extract_iata_from_query, get_indian_airports_list
 from amadeus_flights import AmadeusFlightSearch, get_airline_name, get_airline_website
 
 # Import new modules
-from database import init_db, async_session, User, TravelHistory, UserPreferences
+from database import init_db, async_session, User, TravelHistory, UserPreferences, PackageSnapshot
 from auth import (
     hash_password, verify_password, create_access_token,
     get_current_user, get_optional_user
 )
 from auto_package_generator import generate_packages
 from nlp_parser import extract_travel_intent
+from profile_inference import resolve_all as resolve_profile
 
 from sqlalchemy import select
+
+logger = logging.getLogger(__name__)
+
+
+# ==================== TTL CACHE ====================
+# MVP in-memory cache. Replace with Redis for multi-instance deployment.
+
+class TTLCache:
+    """Simple in-memory cache with per-key TTL."""
+
+    def __init__(self):
+        self._store: dict[str, tuple[float, any]] = {}
+
+    def get(self, key: str):
+        entry = self._store.get(key)
+        if entry is None:
+            return None
+        expires_at, value = entry
+        if time.time() > expires_at:
+            del self._store[key]
+            return None
+        return value
+
+    def remaining_ttl(self, key: str) -> float:
+        entry = self._store.get(key)
+        if entry is None:
+            return 0
+        expires_at, _ = entry
+        remaining = expires_at - time.time()
+        return max(0, remaining)
+
+    def set(self, key: str, value, ttl_seconds: int):
+        self._store[key] = (time.time() + ttl_seconds, value)
+
+    def clear_expired(self):
+        now = time.time()
+        expired = [k for k, (exp, _) in self._store.items() if now > exp]
+        for k in expired:
+            del self._store[k]
+
+
+_cache = TTLCache()
+CACHE_TTL_FLIGHTS = 900       # 15 minutes
+CACHE_TTL_HOTELS = 7200       # 2 hours
+CACHE_TTL_ACTIVITIES = 43200  # 12 hours
 
 load_dotenv()
 
@@ -44,6 +95,8 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
         "https://flightai-sigma.vercel.app"
     ],
     allow_credentials=True,
@@ -157,6 +210,13 @@ class SavePreferencesRequest(BaseModel):
     preferred_destinations: Optional[List[str]] = None
     travel_companions: Optional[str] = None
     accommodation_preference: Optional[str] = "hotel"
+    budget_range_min: Optional[int] = None
+    budget_range_max: Optional[int] = None
+    travel_frequency: Optional[str] = None
+    dietary_needs: Optional[List[str]] = None
+    accessibility_needs: Optional[List[str]] = None
+    preferred_airlines: Optional[List[str]] = None
+    onboarding_step: Optional[int] = None
 
 class TravelHistoryResponse(BaseModel):
     id: int
@@ -328,7 +388,24 @@ async def save_preferences(
                     existing.travel_companions = request.travel_companions
                 if request.accommodation_preference:
                     existing.accommodation_preference = request.accommodation_preference
-                existing.onboarding_completed = True
+                if request.budget_range_min is not None:
+                    existing.budget_range_min = request.budget_range_min
+                if request.budget_range_max is not None:
+                    existing.budget_range_max = request.budget_range_max
+                if request.travel_frequency:
+                    existing.travel_frequency = request.travel_frequency
+                if request.dietary_needs is not None:
+                    existing.dietary_needs = request.dietary_needs
+                if request.accessibility_needs is not None:
+                    existing.accessibility_needs = request.accessibility_needs
+                if request.preferred_airlines is not None:
+                    existing.preferred_airlines = request.preferred_airlines
+                if request.onboarding_step is not None:
+                    existing.onboarding_step = request.onboarding_step
+                    if request.onboarding_step >= 5:
+                        existing.onboarding_completed = True
+                else:
+                    existing.onboarding_completed = True
             else:
                 new_prefs = UserPreferences(
                     user_id=current_user["user_id"],
@@ -338,7 +415,14 @@ async def save_preferences(
                     preferred_destinations=request.preferred_destinations or [],
                     travel_companions=request.travel_companions,
                     accommodation_preference=request.accommodation_preference or "hotel",
-                    onboarding_completed=True,
+                    budget_range_min=request.budget_range_min,
+                    budget_range_max=request.budget_range_max,
+                    travel_frequency=request.travel_frequency,
+                    dietary_needs=request.dietary_needs or [],
+                    accessibility_needs=request.accessibility_needs or [],
+                    preferred_airlines=request.preferred_airlines or [],
+                    onboarding_step=request.onboarding_step or 0,
+                    onboarding_completed=request.onboarding_step is not None and request.onboarding_step >= 5,
                 )
                 session.add(new_prefs)
 
@@ -350,86 +434,169 @@ async def save_preferences(
         raise HTTPException(status_code=500, detail=f"Error saving preferences: {str(e)}")
 
 
+# ==================== AUTO PACKAGE HELPERS ====================
+
+async def _load_user_context(user_id: str):
+    """Load travel history, preferences, and user record for an authenticated user."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(TravelHistory)
+            .where(TravelHistory.user_id == user_id)
+            .order_by(TravelHistory.searched_at.desc())
+            .limit(10)
+        )
+        history_rows = result.scalars().all()
+
+        pref_result = await session.execute(
+            select(UserPreferences).where(UserPreferences.user_id == user_id)
+        )
+        user_prefs = pref_result.scalar_one_or_none()
+
+        user_result = await session.execute(
+            select(User).where(User.id == user_id)
+        )
+        user = user_result.scalar_one_or_none()
+
+    history_dicts = [
+        {
+            "origin_iata": h.origin_iata,
+            "destination_iata": h.destination_iata,
+            "destination_city": h.destination_city,
+            "duration_days": h.duration_days,
+            "searched_at": h.searched_at.isoformat() if h.searched_at else None,
+        }
+        for h in history_rows
+    ]
+
+    prefs_dict = None
+    if user_prefs:
+        prefs_dict = {
+            "interests": user_prefs.interests or [],
+            "budget_level": user_prefs.budget_level,
+            "travel_style": user_prefs.travel_style,
+            "travel_companions": user_prefs.travel_companions,
+            "accommodation_preference": user_prefs.accommodation_preference,
+            "preferred_destinations": user_prefs.preferred_destinations or [],
+            "preferred_airlines": user_prefs.preferred_airlines or [],
+            "budget_range_min": user_prefs.budget_range_min,
+            "budget_range_max": user_prefs.budget_range_max,
+        }
+
+    home_airport = user.home_airport if user else None
+    return history_dicts, prefs_dict, home_airport
+
+
+def _resolve_params(request: AutoPackageRequest, nlp_result: dict,
+                    history_dicts: list, prefs_dict: dict, home_airport: str,
+                    request_preferences: PreferencesInput):
+    """Use profile intelligence to resolve all travel parameters."""
+    resolved = resolve_profile(
+        travel_history=history_dicts,
+        nlp_intent=nlp_result if nlp_result.get("success") else {},
+        user_home_airport=home_airport,
+        user_prefs=prefs_dict,
+        explicit_origin=None,
+        explicit_destination=request.destination,
+        explicit_destination_iata=request.destination_iata,
+        explicit_duration=request.duration_days if request.duration_days != 7 else None,
+        explicit_budget=request.budget_inr,
+    )
+
+    # Merge preferences: request > NLP > DB prefs > defaults
+    interests = request_preferences.interests
+    if not interests and nlp_result.get("interests"):
+        interests = nlp_result["interests"]
+    if not interests and prefs_dict:
+        interests = prefs_dict.get("interests", [])
+
+    travel_style = request_preferences.travel_style
+    if travel_style == "mixed" and nlp_result.get("travel_style"):
+        travel_style = nlp_result["travel_style"]
+    if travel_style == "mixed" and prefs_dict:
+        travel_style = prefs_dict.get("travel_style", "mixed")
+
+    preferences = {
+        "interests": interests or [],
+        "budget_level": request_preferences.budget_level or (prefs_dict or {}).get("budget_level", "moderate"),
+        "travel_style": travel_style,
+        "travel_companions": (prefs_dict or {}).get("travel_companions"),
+        "accommodation_preference": (prefs_dict or {}).get("accommodation_preference", "hotel"),
+        "preferred_airlines": (prefs_dict or {}).get("preferred_airlines", []),
+    }
+
+    return resolved, preferences
+
+
+def _make_cache_key(key_type: str, origin: str, dest: str, date: str,
+                    adults: int = 1, cabin: str = "ECONOMY") -> str:
+    return f"{key_type}:{origin}:{dest}:{date}:{adults}:{cabin}"
+
+
+async def _save_snapshot(user_id: str, pkg_result: dict):
+    """Save PackageSnapshot for each generated tier."""
+    packages = pkg_result.get("packages", [])
+    if not packages:
+        return
+
+    now = datetime.utcnow()
+    async with async_session() as session:
+        for pkg in packages:
+            snapshot = PackageSnapshot(
+                id=str(uuid.uuid4()),
+                user_id=user_id,
+                tier=pkg.get("tier", "unknown"),
+                destination_iata=pkg.get("destination_iata", ""),
+                flight_offer_id=pkg.get("flight_offer_id"),
+                hotel_offer_id=pkg.get("hotel_offer_id"),
+                activity_ids=pkg.get("activity_ids", []),
+                flight_price_inr=pkg.get("flight_price_inr"),
+                hotel_total_inr=pkg.get("hotel_total_inr"),
+                total_package_inr=pkg.get("estimated_total_inr"),
+                fx_rate_used=pkg.get("fx_rate_used"),
+                created_at=now,
+                flight_expires_at=now + timedelta(minutes=15),
+                hotel_expires_at=now + timedelta(hours=2),
+            )
+            session.add(snapshot)
+        await session.commit()
+
+
 # ==================== AUTO PACKAGE ENDPOINTS ====================
 
 @app.post("/auto-packages")
 async def get_auto_packages(
     request: AutoPackageRequest,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_optional_user),
 ):
-    """Generate AI-powered travel packages with real-time Amadeus data."""
+    """Generate AI-powered travel packages with real-time Amadeus data (non-streaming)."""
     try:
-        destination = request.destination
-        destination_iata = request.destination_iata
-        duration = request.duration_days
-        budget = request.budget_inr
-
-        # If natural language query provided, parse it first
+        # Parse NLP query
+        nlp_result = {}
         if request.natural_language_query:
             nlp_result = extract_travel_intent(request.natural_language_query)
-            if nlp_result.get("success"):
-                if not destination and nlp_result.get("destination"):
-                    destination = nlp_result["destination"]
-                if not destination_iata and nlp_result.get("destination_iata"):
-                    destination_iata = nlp_result["destination_iata"]
-                if nlp_result.get("duration_days"):
-                    duration = nlp_result["duration_days"]
-                if nlp_result.get("budget_inr"):
-                    budget = nlp_result["budget_inr"]
-                # Merge NLP-extracted preferences
-                if nlp_result.get("interests") and not request.preferences.interests:
-                    request.preferences.interests = nlp_result["interests"]
-                if nlp_result.get("travel_style") and request.preferences.travel_style == "mixed":
-                    request.preferences.travel_style = nlp_result["travel_style"]
 
-        # Fetch user's travel history from DB
-        async with async_session() as session:
-            result = await session.execute(
-                select(TravelHistory)
-                .where(TravelHistory.user_id == current_user["user_id"])
-                .order_by(TravelHistory.searched_at.desc())
-                .limit(10)
+        # Load user context
+        history_dicts, prefs_dict, home_airport = [], None, None
+        if current_user:
+            history_dicts, prefs_dict, home_airport = await _load_user_context(
+                current_user["user_id"]
             )
-            history_rows = result.scalars().all()
 
-            # Fetch user preferences
-            pref_result = await session.execute(
-                select(UserPreferences)
-                .where(UserPreferences.user_id == current_user["user_id"])
-            )
-            user_prefs = pref_result.scalar_one_or_none()
+        # Profile intelligence resolution
+        resolved, preferences = _resolve_params(
+            request, nlp_result, history_dicts, prefs_dict, home_airport,
+            request.preferences,
+        )
 
-            # Get user's home airport
-            user_result = await session.execute(
-                select(User).where(User.id == current_user["user_id"])
-            )
-            user = user_result.scalar_one_or_none()
+        origin = resolved["origin_iata"]
+        destination = resolved["destination"]
+        destination_iata = resolved["destination_iata"]
+        duration = resolved["duration_days"]
+        budget = resolved["budget_inr"]
 
-        # Convert DB rows to dicts
-        history_dicts = [
-            {
-                "origin_iata": h.origin_iata,
-                "destination_iata": h.destination_iata,
-                "destination_city": h.destination_city,
-                "duration_days": h.duration_days,
-                "searched_at": h.searched_at.isoformat() if h.searched_at else None,
-            }
-            for h in history_rows
-        ]
-
-        # Merge DB preferences with request preferences
-        preferences = {
-            "interests": request.preferences.interests or (user_prefs.interests if user_prefs else []),
-            "budget_level": request.preferences.budget_level or (user_prefs.budget_level if user_prefs else "moderate"),
-            "travel_style": request.preferences.travel_style or (user_prefs.travel_style if user_prefs else "mixed"),
-            "travel_companions": (user_prefs.travel_companions if user_prefs else None),
-            "accommodation_preference": (user_prefs.accommodation_preference if user_prefs else "hotel"),
-        }
-
-        origin = user.home_airport if user and user.home_airport else "BOM"
-
-        # Generate packages with real Amadeus data
-        pkg_result = generate_packages(
+        # Generate packages (blocking call via thread)
+        pkg_result = await asyncio.to_thread(
+            generate_packages,
             travel_history=history_dicts,
             preferences=preferences,
             destination=destination,
@@ -439,37 +606,262 @@ async def get_auto_packages(
             destination_iata=destination_iata,
         )
 
-        # Save preferences if provided
-        if request.preferences.interests:
-            async with async_session() as session:
-                pref_result = await session.execute(
-                    select(UserPreferences)
-                    .where(UserPreferences.user_id == current_user["user_id"])
-                )
-                existing_prefs = pref_result.scalar_one_or_none()
+        # Add inference log to response
+        pkg_result["inference_log"] = resolved.get("inference_log", {})
 
-                if existing_prefs:
-                    existing_prefs.interests = request.preferences.interests
-                    existing_prefs.budget_level = request.preferences.budget_level or existing_prefs.budget_level
-                    existing_prefs.travel_style = request.preferences.travel_style or existing_prefs.travel_style
-                else:
-                    new_prefs = UserPreferences(
-                        user_id=current_user["user_id"],
-                        interests=request.preferences.interests,
-                        budget_level=request.preferences.budget_level or "moderate",
-                        travel_style=request.preferences.travel_style or "mixed",
-                    )
-                    session.add(new_prefs)
-
-                await session.commit()
+        # Save snapshot if authenticated
+        if current_user:
+            try:
+                await _save_snapshot(current_user["user_id"], pkg_result)
+            except Exception as snap_err:
+                logger.warning(f"Non-critical: snapshot save failed: {snap_err}")
 
         return pkg_result
 
     except Exception as e:
+        logger.exception("Error generating packages")
         raise HTTPException(
             status_code=500,
             detail=f"Error generating packages: {str(e)}"
         )
+
+
+@app.post("/auto-packages-stream")
+async def get_auto_packages_stream(
+    request: AutoPackageRequest,
+    current_user: dict = Depends(get_optional_user),
+):
+    """Generate travel packages with SSE progress updates."""
+
+    async def event_stream():
+        def send_event(event_type: str, data: dict) -> str:
+            return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+
+        try:
+            # Step 1: NLP parsing
+            yield send_event("progress", {
+                "step": "nlp", "message": "Parsing your request...", "percent": 5
+            })
+
+            nlp_result = {}
+            if request.natural_language_query:
+                nlp_result = await asyncio.to_thread(
+                    extract_travel_intent, request.natural_language_query
+                )
+
+            yield send_event("progress", {
+                "step": "nlp", "message": "Request parsed", "percent": 10
+            })
+
+            # Step 2: Load user context + profile intelligence
+            yield send_event("progress", {
+                "step": "profile", "message": "Loading your profile...", "percent": 15
+            })
+
+            history_dicts, prefs_dict, home_airport = [], None, None
+            if current_user:
+                history_dicts, prefs_dict, home_airport = await _load_user_context(
+                    current_user["user_id"]
+                )
+
+            resolved, preferences = _resolve_params(
+                request, nlp_result, history_dicts, prefs_dict, home_airport,
+                request.preferences,
+            )
+
+            origin = resolved["origin_iata"]
+            destination = resolved["destination"]
+            destination_iata = resolved["destination_iata"]
+            duration = resolved["duration_days"]
+            budget = resolved["budget_inr"]
+
+            yield send_event("progress", {
+                "step": "profile",
+                "message": f"Resolved: {origin} → {destination_iata or destination}",
+                "percent": 20
+            })
+
+            if not destination_iata:
+                yield send_event("error", {
+                    "message": "Could not determine destination. Please be more specific."
+                })
+                return
+
+            # Step 3: Parallel Amadeus data fetch (with cache)
+            dep_date = (datetime.utcnow() + timedelta(days=14)).strftime("%Y-%m-%d")
+            ret_date = (datetime.utcnow() + timedelta(days=14 + duration)).strftime("%Y-%m-%d")
+
+            flight_key = _make_cache_key("flights", origin, destination_iata, dep_date)
+            hotel_key = _make_cache_key("hotels", destination_iata, destination_iata, dep_date)
+            activity_key = _make_cache_key("activities", destination_iata, destination_iata, dep_date)
+
+            cached_flights = _cache.get(flight_key)
+            cached_hotels = _cache.get(hotel_key)
+            cached_activities = _cache.get(activity_key)
+
+            # Import fetch functions from auto_package_generator
+            from auto_package_generator import (
+                _fetch_real_flights, _fetch_real_hotels, _fetch_real_activities
+            )
+
+            # Create Amadeus client for parallel fetches
+            _amadeus = AmadeusFlightSearch() if amadeus_searcher else None
+
+            flights_data, hotels_data, activities_data = None, None, None
+
+            async def fetch_flights():
+                nonlocal flights_data
+                if cached_flights:
+                    flights_data = cached_flights
+                    return
+                if not _amadeus:
+                    flights_data = {"flights": {"economy": [], "business": [], "all": []}, "total": 0, "errors": []}
+                    return
+                flights_data = await asyncio.to_thread(
+                    _fetch_real_flights, _amadeus, origin, destination_iata, dep_date, ret_date, 1
+                )
+                if flights_data and flights_data.get("total", 0) > 0:
+                    _cache.set(flight_key, flights_data, CACHE_TTL_FLIGHTS)
+
+            async def fetch_hotels():
+                nonlocal hotels_data
+                if cached_hotels:
+                    hotels_data = cached_hotels
+                    return
+                if not _amadeus:
+                    hotels_data = {"hotels": [], "total": 0, "error": None}
+                    return
+                hotels_data = await asyncio.to_thread(
+                    _fetch_real_hotels, _amadeus, destination_iata, dep_date, ret_date, 1
+                )
+                if hotels_data and hotels_data.get("total", 0) > 0:
+                    _cache.set(hotel_key, hotels_data, CACHE_TTL_HOTELS)
+
+            async def fetch_activities():
+                nonlocal activities_data
+                if cached_activities:
+                    activities_data = cached_activities
+                    return
+                if not _amadeus:
+                    activities_data = {"activities": [], "total": 0, "error": None}
+                    return
+                activities_data = await asyncio.to_thread(
+                    _fetch_real_activities, _amadeus, destination_iata
+                )
+                if activities_data and activities_data.get("total", 0) > 0:
+                    _cache.set(activity_key, activities_data, CACHE_TTL_ACTIVITIES)
+
+            yield send_event("progress", {
+                "step": "flights", "message": "Searching flights...", "percent": 25
+            })
+
+            # Run all 3 fetches in parallel with individual timeouts
+            flight_task = asyncio.create_task(fetch_flights())
+            hotel_task = asyncio.create_task(fetch_hotels())
+            activity_task = asyncio.create_task(fetch_activities())
+
+            # Wait for flights first (usually fastest to resolve UX)
+            try:
+                await asyncio.wait_for(flight_task, timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning("Flight fetch timed out")
+                flights_data = {"flights": {"economy": [], "business": [], "all": []}, "total": 0, "errors": ["timeout"]}
+
+            flight_count = flights_data.get("total", 0) if isinstance(flights_data, dict) else 0
+            yield send_event("progress", {
+                "step": "flights",
+                "message": f"Found {flight_count} flights" + (" (cached)" if cached_flights else ""),
+                "percent": 40
+            })
+
+            yield send_event("progress", {
+                "step": "hotels", "message": "Searching hotels...", "percent": 45
+            })
+
+            try:
+                await asyncio.wait_for(hotel_task, timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning("Hotel fetch timed out")
+                hotels_data = {"hotels": [], "total": 0, "error": "timeout"}
+
+            hotel_count = hotels_data.get("total", 0) if isinstance(hotels_data, dict) else 0
+            yield send_event("progress", {
+                "step": "hotels",
+                "message": f"Found {hotel_count} hotels" + (" (cached)" if cached_hotels else ""),
+                "percent": 55
+            })
+
+            yield send_event("progress", {
+                "step": "activities", "message": "Finding activities...", "percent": 60
+            })
+
+            try:
+                await asyncio.wait_for(activity_task, timeout=15)
+            except asyncio.TimeoutError:
+                logger.warning("Activity fetch timed out")
+                activities_data = {"activities": [], "total": 0, "error": "timeout"}
+
+            activity_count = activities_data.get("total", 0) if isinstance(activities_data, dict) else 0
+            yield send_event("progress", {
+                "step": "activities",
+                "message": f"Found {activity_count} activities" + (" (cached)" if cached_activities else ""),
+                "percent": 70
+            })
+
+            # Step 4: Generate packages (normalize + tier build + LLM narrative + validate)
+            yield send_event("progress", {
+                "step": "ai", "message": "AI curating your packages...", "percent": 75
+            })
+
+            pkg_result = await asyncio.to_thread(
+                generate_packages,
+                travel_history=history_dicts,
+                preferences=preferences,
+                destination=destination,
+                origin_iata=origin,
+                duration_days=duration,
+                budget_inr=budget,
+                destination_iata=destination_iata,
+                prefetched_flights=flights_data,
+                prefetched_hotels=hotels_data,
+                prefetched_activities=activities_data,
+            )
+
+            yield send_event("progress", {
+                "step": "validate", "message": "Validating packages...", "percent": 95
+            })
+
+            # Add inference log
+            pkg_result["inference_log"] = resolved.get("inference_log", {})
+
+            # Save snapshot
+            if current_user:
+                try:
+                    await _save_snapshot(current_user["user_id"], pkg_result)
+                except Exception as snap_err:
+                    logger.warning(f"Snapshot save failed: {snap_err}")
+
+            yield send_event("progress", {
+                "step": "done", "message": "Packages ready!", "percent": 100
+            })
+
+            yield send_event("complete", pkg_result)
+
+        except Exception as e:
+            logger.exception("SSE stream error")
+            yield send_event("error", {
+                "message": f"Error generating packages: {str(e)}"
+            })
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
 
 
 # ==================== EXISTING ENDPOINTS ====================

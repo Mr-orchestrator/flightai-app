@@ -32,6 +32,7 @@ RETURN ONLY a JSON object with this exact structure:
   "destination": "<city or region name, or null if not specified>",
   "duration_days": <integer number of days, or null if not specified>,
   "budget_inr": <integer budget in INR, or null if not specified>,
+  "departure_date": "<YYYY-MM-DD format date, or null if not specified>",
   "interests": ["<list of interests like beach, culture, adventure, food, shopping, nature, relaxation, nightlife, history, wildlife>"],
   "travel_style": "<one of: adventure, cultural, relaxation, luxury, backpacking, family, romantic, or mixed>",
   "travel_companions": "<one of: solo, couple, family, friends, or null if not specified>",
@@ -42,6 +43,7 @@ Rules:
 - Extract as much information as possible from the query
 - For budget: if they say "50k" or "50000", convert to integer 50000. If in USD/EUR, convert to approximate INR.
 - For duration: "a week" = 7, "weekend" = 3, "10 days" = 10, "fortnight" = 14
+- For departure_date: convert relative dates to YYYY-MM-DD. "next week" = next Monday. "in March" = first of March. "tomorrow" = tomorrow's date.
 - For interests: infer from context. "beach vacation" → ["beach", "relaxation"]. "explore temples" → ["culture", "history"]
 - If information is not in the query, use null (not empty string)
 - Return ONLY valid JSON, no commentary"""
@@ -84,6 +86,7 @@ def extract_travel_intent(query: str) -> dict:
         "destination_iata": None,
         "duration_days": None,
         "budget_inr": None,
+        "departure_date": None,
         "interests": [],
         "travel_style": "mixed",
         "travel_companions": None,
@@ -153,6 +156,8 @@ def extract_travel_intent(query: str) -> dict:
                 result["travel_companions"] = parsed["travel_companions"]
             if parsed.get("specific_requests"):
                 result["specific_requests"] = parsed["specific_requests"]
+            if parsed.get("departure_date"):
+                result["departure_date"] = parsed["departure_date"]
 
             result["success"] = True
             result["model_used"] = model_name

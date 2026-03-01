@@ -81,8 +81,38 @@ class UserPreferences(Base):
     travel_companions = Column(String(20), nullable=True)  # solo/couple/family/friends
     accommodation_preference = Column(String(20), default="hotel")  # hotel/resort/hostel
     onboarding_completed = Column(Boolean, default=False)
+    # Extended personalization fields
+    budget_range_min = Column(Integer, nullable=True)
+    budget_range_max = Column(Integer, nullable=True)
+    travel_frequency = Column(String(20), nullable=True)  # monthly/quarterly/yearly/rarely
+    dietary_needs = Column(JSON, default=list)
+    accessibility_needs = Column(JSON, default=list)
+    preferred_airlines = Column(JSON, default=list)  # carrier codes e.g. ["AI", "6E", "EK"]
+    onboarding_step = Column(Integer, default=0)
 
     user = relationship("User", back_populates="preferences")
+
+
+class PackageSnapshot(Base):
+    """Stores selected offer IDs for booking revalidation."""
+    __tablename__ = "package_snapshots"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    tier = Column(String(20), nullable=False)
+    destination_iata = Column(String(3), nullable=False)
+    flight_offer_id = Column(String(100), nullable=True)
+    hotel_offer_id = Column(String(100), nullable=True)
+    activity_ids = Column(JSON, default=list)
+    flight_price_inr = Column(Integer, nullable=True)
+    hotel_total_inr = Column(Integer, nullable=True)
+    total_package_inr = Column(Integer, nullable=True)
+    fx_rate_used = Column(String(50), nullable=True)  # e.g. "USD_TO_INR=83.5"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    flight_expires_at = Column(DateTime, nullable=True)   # +15 min
+    hotel_expires_at = Column(DateTime, nullable=True)    # +2 hours
+
+    user = relationship("User")
 
 
 async def init_db():

@@ -11,9 +11,9 @@ import {
   FiX,
 } from 'react-icons/fi';
 import {
-  fetchAutoPackages, getOnboardingStatus, savePreferences,
+  fetchAutoPackages, fetchAutoPackagesStream, getOnboardingStatus, savePreferences,
 } from '@/lib/api';
-import type { TravelPackage, AutoPackageResponse } from '@/lib/api';
+import type { TravelPackage, AutoPackageResponse, ProgressEvent } from '@/lib/api';
 
 interface AutoPackageSectionProps {
   originIata: string;
@@ -103,6 +103,12 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [dataQuality, setDataQuality] = useState<string | null>(null);
   const [amadeusStats, setAmadeusStats] = useState<{ flights_found: number; hotels_found: number; activities_found: number } | null>(null);
 
+  // Progress tracking
+  const [progressPercent, setProgressPercent] = useState(0);
+  const [progressMessage, setProgressMessage] = useState('');
+  const [progressStep, setProgressStep] = useState('');
+  const [abortStream, setAbortStream] = useState<(() => void) | null>(null);
+
   // Natural language input
   const [nlQuery, setNlQuery] = useState('');
   const [useNL, setUseNL] = useState(true);
@@ -151,73 +157,67 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
     }
   };
 
-  const handleGenerate = async () => {
+  const handleGenerate = () => {
+    // Cancel any in-flight stream
+    if (abortStream) abortStream();
+
     setIsLoading(true);
     setError(null);
     setPackages([]);
     setNote('');
     setDataQuality(null);
     setAmadeusStats(null);
+    setProgressPercent(0);
+    setProgressMessage('Starting...');
+    setProgressStep('');
 
-    try {
-      const result: AutoPackageResponse = await fetchAutoPackages({
-        destination: destination || undefined,
-        duration_days: duration,
-        natural_language_query: useNL && nlQuery ? nlQuery : undefined,
-        preferences: {
-          interests: selectedInterests.length > 0 ? selectedInterests : undefined,
-          budget_level: budgetLevel,
-          travel_style: 'mixed',
-        },
-      });
+    const requestPayload = {
+      destination: destination || undefined,
+      duration_days: duration,
+      natural_language_query: useNL && nlQuery ? nlQuery : undefined,
+      preferences: {
+        interests: selectedInterests.length > 0 ? selectedInterests : undefined,
+        budget_level: budgetLevel,
+        travel_style: 'mixed' as const,
+      },
+    };
 
-      if (result.success && result.packages.length > 0) {
-        setPackages(result.packages);
-        setNote(result.personalization_note);
-        setModelUsed(result.model_used);
-        setDataQuality(result.data_quality);
-        setAmadeusStats(result.amadeus_data || null);
-      } else {
-        setError(result.error || 'No packages generated');
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to generate packages');
-    } finally {
-      setIsLoading(false);
-    }
+    const cancel = fetchAutoPackagesStream(
+      requestPayload,
+      // onProgress
+      (event: ProgressEvent) => {
+        setProgressPercent(event.percent);
+        setProgressMessage(event.message);
+        setProgressStep(event.step);
+      },
+      // onComplete
+      (result: AutoPackageResponse) => {
+        if (result.success && result.packages.length > 0) {
+          setPackages(result.packages);
+          setNote(result.personalization_note);
+          setModelUsed(result.model_used);
+          setDataQuality(result.data_quality);
+          setAmadeusStats(result.amadeus_data || null);
+        } else {
+          setError(result.error || 'No packages generated');
+        }
+        setIsLoading(false);
+        setAbortStream(null);
+      },
+      // onError
+      (errorMsg: string) => {
+        setError(errorMsg);
+        setIsLoading(false);
+        setAbortStream(null);
+      },
+    );
+
+    setAbortStream(() => cancel);
   };
 
   const filteredPackages = activeTierFilter
     ? packages.filter((p) => p.tier === activeTierFilter)
     : packages;
-
-  // Not authenticated — show prompt
-  if (!isAuth) {
-    return (
-      <motion.div
-        initial={{ opacity: 0, y: 30 }}
-        animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.8, delay: 0.3 }}
-        className="mt-16 max-w-4xl mx-auto"
-      >
-        <div className="bg-gradient-glass backdrop-blur-2xl rounded-luxury border border-gold-500/20 shadow-luxury p-10 text-center">
-          <FiPackage className="w-12 h-12 text-gold-400 mx-auto mb-4" />
-          <h3 className="text-2xl font-display font-bold text-white mb-3">
-            AI Travel Packages
-          </h3>
-          <p className="text-premium-mist/60 mb-6 max-w-md mx-auto">
-            Sign in to unlock personalized travel packages powered by AI with real-time flight and hotel data.
-          </p>
-          <a
-            href="/auth"
-            className="inline-block px-8 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 shadow-glow hover:scale-105 transition-transform"
-          >
-            Sign In to Get Started
-          </a>
-        </div>
-      </motion.div>
-    );
-  }
 
   return (
     <motion.div
@@ -357,19 +357,43 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
 
         <div className="p-8 md:p-10">
           {/* Header */}
-          <div className="flex items-center gap-3 mb-8">
-            <div className="p-3 rounded-xl bg-gold-500/10 border border-gold-500/20">
-              <FiPackage className="w-6 h-6 text-gold-400" />
+          <div className="flex items-center justify-between mb-8">
+            <div className="flex items-center gap-3">
+              <div className="p-3 rounded-xl bg-gold-500/10 border border-gold-500/20">
+                <FiPackage className="w-6 h-6 text-gold-400" />
+              </div>
+              <div>
+                <h2 className="text-3xl font-display font-bold text-white">
+                  AI Travel Packages
+                </h2>
+                <p className="text-premium-mist/60 mt-1">
+                  Real-time flights & hotels powered by Amadeus + AI curation
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-3xl font-display font-bold text-white">
-                AI Travel Packages
-              </h2>
-              <p className="text-premium-mist/60 mt-1">
-                Real-time flights & hotels powered by Amadeus + AI curation
-              </p>
-            </div>
+            {isAuth && (
+              <button
+                onClick={() => setShowOnboarding(true)}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border border-gold-500/30 bg-gold-500/10 text-gold-400 text-sm font-semibold hover:bg-gold-500/20 transition-all"
+              >
+                <FiUsers className="w-4 h-4" />
+                Personalize
+              </button>
+            )}
           </div>
+
+          {/* Sign-in prompt for unauthenticated users */}
+          {!isAuth && (
+            <div className="mb-6 p-4 bg-gold-500/5 border border-gold-500/20 rounded-xl flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <FiUsers className="w-5 h-5 text-gold-400" />
+                <p className="text-sm text-premium-mist/70">
+                  <a href="/auth" className="text-gold-400 font-semibold hover:text-gold-300 transition-colors">Sign in</a>
+                  {' '}for personalized recommendations based on your travel history & preferences
+                </p>
+              </div>
+            </div>
+          )}
 
           {/* Natural Language Input */}
           <div className="mb-6">
@@ -503,7 +527,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                     animate={{ rotate: 360 }}
                     transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
                   />
-                  Fetching real-time data & generating packages...
+                  {progressMessage || 'Generating packages...'}
                 </>
               ) : (
                 <>
@@ -513,6 +537,45 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
               )}
             </span>
           </motion.button>
+
+          {/* Progress bar */}
+          <AnimatePresence>
+            {isLoading && progressPercent > 0 && (
+              <motion.div
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                className="mt-4"
+              >
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs text-premium-mist/60 font-medium">{progressMessage}</span>
+                  <span className="text-xs text-gold-400 font-bold">{progressPercent}%</span>
+                </div>
+                <div className="h-2 bg-premium-surface/50 rounded-full overflow-hidden border border-premium-border/30">
+                  <motion.div
+                    className="h-full bg-gradient-gold rounded-full"
+                    initial={{ width: 0 }}
+                    animate={{ width: `${progressPercent}%` }}
+                    transition={{ duration: 0.5, ease: 'easeOut' }}
+                  />
+                </div>
+                <div className="flex justify-between mt-2 text-[10px] text-premium-mist/40">
+                  <span className={progressStep === 'nlp' || progressStep === 'profile' ? 'text-gold-400 font-bold' : ''}>
+                    Parse & Profile
+                  </span>
+                  <span className={progressStep === 'flights' || progressStep === 'hotels' || progressStep === 'activities' ? 'text-gold-400 font-bold' : ''}>
+                    Amadeus Data
+                  </span>
+                  <span className={progressStep === 'ai' || progressStep === 'validate' ? 'text-gold-400 font-bold' : ''}>
+                    AI Curation
+                  </span>
+                  <span className={progressStep === 'done' ? 'text-gold-400 font-bold' : ''}>
+                    Done
+                  </span>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {/* Error */}
           <AnimatePresence>
