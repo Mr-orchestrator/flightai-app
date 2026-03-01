@@ -143,6 +143,8 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [onboardingChecked, setOnboardingChecked] = useState(false);
   const [onboardingStep, setOnboardingStep] = useState(1);
+  const [autoGenerateAfterOnboarding, setAutoGenerateAfterOnboarding] = useState(false);
+  const [profileReady, setProfileReady] = useState(false); // returning user with prefs
   const [companions, setCompanions] = useState('');
   const [accommodation, setAccommodation] = useState('hotel');
   const [dreamDestinations, setDreamDestinations] = useState('');
@@ -160,12 +162,24 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
         .then((status) => {
           if (!status.onboarding_completed) {
             setShowOnboarding(true);
+          } else if (status.has_preferences) {
+            // Returning user with completed profile — mark ready for auto-suggest
+            setProfileReady(true);
           }
           setOnboardingChecked(true);
         })
         .catch(() => setOnboardingChecked(true));
     }
   }, [isAuth, onboardingChecked]);
+
+  // Auto-generate after onboarding completes
+  useEffect(() => {
+    if (autoGenerateAfterOnboarding && !isLoading) {
+      setAutoGenerateAfterOnboarding(false);
+      handleGenerate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoGenerateAfterOnboarding]);
 
   const toggleInterest = (id: string) => {
     setSelectedInterests((prev) =>
@@ -198,6 +212,8 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
       });
       setShowOnboarding(false);
       setOnboardingStep(1);
+      // Auto-generate personalized packages based on saved preferences
+      setAutoGenerateAfterOnboarding(true);
     } catch {
       setShowOnboarding(false);
       setOnboardingStep(1);
@@ -578,6 +594,28 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                 </p>
               </div>
             </div>
+          )}
+
+          {/* Profile-ready banner for returning authenticated users */}
+          {isAuth && profileReady && packages.length === 0 && !isLoading && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="mb-6 p-4 bg-emerald-500/5 border border-emerald-500/20 rounded-xl flex items-center justify-between"
+            >
+              <div className="flex items-center gap-3">
+                <FiStar className="w-5 h-5 text-emerald-400" />
+                <p className="text-sm text-premium-mist/70">
+                  Your profile is set up! Hit <span className="text-emerald-400 font-semibold">Generate</span> for personalized packages based on your preferences, or type a specific trip below.
+                </p>
+              </div>
+              <button
+                onClick={handleGenerate}
+                className="ml-4 px-4 py-2 bg-emerald-500/20 border border-emerald-500/30 rounded-lg text-emerald-400 text-sm font-bold hover:bg-emerald-500/30 transition-all whitespace-nowrap"
+              >
+                Suggest for me
+              </button>
+            </motion.div>
           )}
 
           {/* Natural Language Input */}

@@ -57,6 +57,37 @@ INTEREST_GATEWAY_OVERRIDES = {
     },
 }
 
+# City name to IATA mapping (for resolving preferred_destinations stored as names)
+CITY_NAME_TO_IATA = {
+    # India
+    "New Delhi": "DEL", "Delhi": "DEL", "Mumbai": "BOM", "Bangalore": "BLR",
+    "Bengaluru": "BLR", "Hyderabad": "HYD", "Chennai": "MAA", "Kolkata": "CCU",
+    "Kochi": "COK", "Goa": "GOI", "Ahmedabad": "AMD", "Pune": "PNQ",
+    "Jaipur": "JAI", "Varanasi": "VNS", "Srinagar": "SXR",
+    # Middle East
+    "Dubai": "DXB", "Abu Dhabi": "AUH", "Doha": "DOH", "Muscat": "MCT",
+    "Riyadh": "RUH", "Jeddah": "JED", "Bahrain": "BAH",
+    # Southeast Asia
+    "Singapore": "SIN", "Bangkok": "BKK", "Kuala Lumpur": "KUL",
+    "Hong Kong": "HKG", "Ho Chi Minh City": "SGN", "Hanoi": "HAN",
+    "Manila": "MNL", "Bali": "DPS",
+    # East Asia
+    "Tokyo": "NRT", "Seoul": "ICN", "Beijing": "PEK", "Shanghai": "PVG",
+    # Europe
+    "London": "LHR", "Paris": "CDG", "Frankfurt": "FRA", "Amsterdam": "AMS",
+    "Rome": "FCO", "Barcelona": "BCN", "Madrid": "MAD", "Istanbul": "IST",
+    "Zurich": "ZRH", "Vienna": "VIE", "Munich": "MUC",
+    # Americas
+    "New York": "JFK", "Los Angeles": "LAX", "San Francisco": "SFO",
+    "Chicago": "ORD", "Toronto": "YYZ",
+    # Oceania
+    "Sydney": "SYD", "Melbourne": "MEL",
+    # Africa
+    "Johannesburg": "JNB", "Cairo": "CAI", "Nairobi": "NBO",
+    # Island
+    "Maldives": "MLE", "Male": "MLE", "Colombo": "CMB",
+}
+
 # IATA code to country mapping (reverse lookup for history matching)
 IATA_TO_COUNTRY = {
     "YYZ": "Canada", "YVR": "Canada", "YYC": "Canada", "YUL": "Canada",
@@ -186,9 +217,21 @@ def infer_destination(
                 visited.add(trip["destination_iata"])
 
         for pref in prefs:
-            pref_upper = pref.strip().upper()
+            pref_stripped = pref.strip()
+            pref_upper = pref_stripped.upper()
+            # Check if it's already an IATA code
             if len(pref_upper) == 3 and pref_upper not in visited:
-                return None, pref_upper, "preferred"
+                return pref_stripped, pref_upper, "preferred"
+            # Check if it's a city name — resolve to IATA
+            iata = CITY_NAME_TO_IATA.get(pref_stripped.title())
+            if iata and iata not in visited:
+                return pref_stripped, iata, "preferred"
+            # Check if it's a country name — use gateway
+            country_key = pref_stripped.title()
+            if country_key in COUNTRY_GATEWAYS:
+                gateway = COUNTRY_GATEWAYS[country_key]
+                if gateway not in visited:
+                    return pref_stripped, gateway, "preferred"
 
     return None, None, "none"
 
