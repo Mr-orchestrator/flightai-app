@@ -479,7 +479,7 @@ class AmadeusFlightSearch:
             if len(parsed_hotels) < max_hotels:
                 remaining = [h for h in hotel_list_data[:max_hotels]
                              if h.get('hotelId') not in live_hotel_ids]
-                parsed_hotels.extend(self._hotels_from_list(remaining[:max_hotels - len(parsed_hotels)]))
+                parsed_hotels.extend(self._hotels_from_list(remaining[:max_hotels - len(parsed_hotels)], city_code))
 
             # Sort by star rating (higher first) then estimated price
             parsed_hotels.sort(key=lambda h: (-(h.get('star_rating') or 0), h.get('price_per_night', float('inf'))))
@@ -576,17 +576,23 @@ class AmadeusFlightSearch:
         except Exception:
             return None
 
-    def _hotels_from_list(self, hotel_list_data):
+    def _hotels_from_list(self, hotel_list_data, city_code=""):
         """Create hotel entries from hotel list data when offers aren't available.
-        Uses real hotel names/ratings from Amadeus but marks prices as estimated."""
-        # Rough price estimates per star rating (INR per night)
-        price_estimates = {1: 1500, 2: 2500, 3: 4000, 4: 7000, 5: 15000}
+        Uses real hotel names/ratings from Amadeus but marks prices as estimated.
+        Prices are region-adjusted based on city_code."""
+        # Region-aware price multipliers (baseline = India domestic)
+        region_multiplier = self._get_region_price_multiplier(city_code)
+
+        # Base INR estimates (for Indian domestic destinations)
+        base_prices = {1: 1500, 2: 2500, 3: 3500, 4: 6000, 5: 12000}
 
         parsed = []
         for h in hotel_list_data:
             rating = h.get('rating')
             star = int(rating) if rating else 3
             geo = h.get('geoCode', {})
+            base = base_prices.get(star, 5000)
+            estimated_price = int(base * region_multiplier)
 
             parsed.append({
                 'hotel_id': h.get('hotelId', ''),
@@ -595,7 +601,7 @@ class AmadeusFlightSearch:
                 'latitude': geo.get('latitude'),
                 'longitude': geo.get('longitude'),
                 'price_total': None,
-                'price_per_night': price_estimates.get(star, 5000),
+                'price_per_night': estimated_price,
                 'currency': 'INR',
                 'room_type': 'STANDARD',
                 'bed_type': 'UNKNOWN',
@@ -606,6 +612,44 @@ class AmadeusFlightSearch:
                 'data_source': 'amadeus_list',  # Real name, estimated price
             })
         return parsed
+
+    @staticmethod
+    def _get_region_price_multiplier(city_code: str) -> float:
+        """Return a price multiplier based on the destination region."""
+        city_code = (city_code or "").upper()
+        # Southeast Asia (affordable)
+        if city_code in ("BKK", "CNX", "HKT", "SGN", "HAN", "MNL", "DPS", "KUL"):
+            return 1.0
+        # India domestic
+        if city_code in ("DEL", "BOM", "BLR", "MAA", "HYD", "CCU", "COK", "GOI",
+                         "AMD", "PNQ", "JAI", "TRV", "IXC", "VNS", "SXR"):
+            return 1.0
+        # Middle East (moderate-high)
+        if city_code in ("DXB", "AUH", "DOH", "BAH", "MCT", "RUH", "JED"):
+            return 1.8
+        # Singapore, Hong Kong (high)
+        if city_code in ("SIN", "HKG"):
+            return 2.2
+        # East Asia
+        if city_code in ("NRT", "ICN", "PEK", "PVG"):
+            return 2.0
+        # Europe (expensive)
+        if city_code in ("LHR", "CDG", "FRA", "AMS", "FCO", "BCN", "MAD",
+                         "IST", "ZRH", "VIE", "MUC"):
+            return 2.5
+        # Americas (expensive)
+        if city_code in ("JFK", "LAX", "SFO", "ORD", "YYZ"):
+            return 2.8
+        # Oceania
+        if city_code in ("SYD", "MEL"):
+            return 2.5
+        # Maldives / Sri Lanka
+        if city_code in ("MLE",):
+            return 3.5
+        if city_code in ("CMB",):
+            return 1.2
+        # Default moderate multiplier
+        return 1.5
 
     # ==================== ACTIVITY/TOURS SEARCH ====================
 

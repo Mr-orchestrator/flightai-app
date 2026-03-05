@@ -49,48 +49,58 @@ GEMINI_MODEL_CANDIDATES = [
 
 def _fetch_real_flights(amadeus: AmadeusFlightSearch, origin: str, destination: str,
                         departure_date: str, return_date: str, adults: int = 1) -> dict:
-    """Fetch real flight offers from Amadeus for multiple cabin classes."""
-    flights_data = {"economy": [], "business": [], "all": []}
-    errors = []
+    """Fetch real flight offers from Amadeus for multiple cabin classes.
+    Retries once if the first attempt returns 0 results (handles transient errors)."""
+    import time as _time
 
-    for cabin in ["ECONOMY", "BUSINESS"]:
-        try:
-            result = amadeus.search_flights(
-                origin=origin,
-                destination=destination,
-                departure_date=departure_date,
-                return_date=return_date,
-                adults=adults,
-                max_results=5,
-                currency="INR",
-                travel_class=cabin,
-            )
-            if result.get('success') and result.get('flights'):
-                key = cabin.lower()
-                for f in result['flights']:
-                    flight_summary = {
-                        "price_inr": float(f['price'].get('total', 0)),
-                        "carrier": f['outbound'].get('carrier', ''),
-                        "airline_name": get_airline_name(f['outbound'].get('carrier', '')),
-                        "flight_number": f"{f['outbound'].get('carrier', '')}{f['outbound'].get('flight_number', '')}",
-                        "cabin": cabin,
-                        "stops": f['outbound'].get('stops', 0),
-                        "duration": f['outbound'].get('duration', ''),
-                        "departure_time": f['outbound']['departure'].get('time', ''),
-                        "arrival_time": f['outbound']['arrival'].get('time', ''),
-                        "data_source": "amadeus",
-                        "offer_id": f.get("id"),  # Amadeus offer ID for booking
-                    }
-                    flights_data[key].append(flight_summary)
-                    flights_data["all"].append(flight_summary)
-        except Exception as e:
-            errors.append(f"{cabin}: {str(e)}")
+    def _do_fetch():
+        flights_data = {"economy": [], "business": [], "all": []}
+        errors = []
+        for cabin in ["ECONOMY", "BUSINESS"]:
+            try:
+                result = amadeus.search_flights(
+                    origin=origin,
+                    destination=destination,
+                    departure_date=departure_date,
+                    return_date=return_date,
+                    adults=adults,
+                    max_results=5,
+                    currency="INR",
+                    travel_class=cabin,
+                )
+                if result.get('success') and result.get('flights'):
+                    key = cabin.lower()
+                    for f in result['flights']:
+                        flight_summary = {
+                            "price_inr": float(f['price'].get('total', 0)),
+                            "carrier": f['outbound'].get('carrier', ''),
+                            "airline_name": get_airline_name(f['outbound'].get('carrier', '')),
+                            "flight_number": f"{f['outbound'].get('carrier', '')}{f['outbound'].get('flight_number', '')}",
+                            "cabin": cabin,
+                            "stops": f['outbound'].get('stops', 0),
+                            "duration": f['outbound'].get('duration', ''),
+                            "departure_time": f['outbound']['departure'].get('time', ''),
+                            "arrival_time": f['outbound']['arrival'].get('time', ''),
+                            "data_source": "amadeus",
+                            "offer_id": f.get("id"),
+                        }
+                        flights_data[key].append(flight_summary)
+                        flights_data["all"].append(flight_summary)
+            except Exception as e:
+                errors.append(f"{cabin}: {str(e)}")
+        return {"flights": flights_data, "total": len(flights_data["all"]), "errors": errors}
 
-    return {
-        "flights": flights_data,
-        "total": len(flights_data["all"]),
-        "errors": errors,
-    }
+    result = _do_fetch()
+
+    # Retry once if 0 flights (transient Amadeus error)
+    if result["total"] == 0 and not result["errors"]:
+        logger.info(f"Flight search returned 0 results for {origin}->{destination}, retrying...")
+        _time.sleep(1)
+        result = _do_fetch()
+        if result["total"] == 0:
+            logger.warning(f"Flight retry also returned 0 for {origin}->{destination}")
+
+    return result
 
 
 def _fetch_real_hotels(amadeus: AmadeusFlightSearch, city_code: str,
