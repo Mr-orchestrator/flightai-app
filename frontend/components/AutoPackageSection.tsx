@@ -12,8 +12,9 @@ import {
 } from 'react-icons/fi';
 import {
   fetchAutoPackages, fetchAutoPackagesStream, getOnboardingStatus, savePreferences,
-  bookPackage, trackEngagement,
+  bookPackage, trackEngagement, getProfileDefaults, getSuggestedDestinations,
 } from '@/lib/api';
+import type { ProfileDefaults, SuggestedDestination } from '@/lib/api';
 import type {
   TravelPackage, AutoPackageResponse, ProgressEvent,
   BookPackageRequest, TrackEngagementRequest,
@@ -26,47 +27,44 @@ interface AutoPackageSectionProps {
 }
 
 const INTEREST_OPTIONS = [
-  { id: 'beach', label: 'Beach', icon: <FiSun className="w-4 h-4" /> },
-  { id: 'culture', label: 'Culture', icon: <FiCamera className="w-4 h-4" /> },
-  { id: 'adventure', label: 'Adventure', icon: <FiMapPin className="w-4 h-4" /> },
-  { id: 'food', label: 'Food & Dining', icon: <FiHeart className="w-4 h-4" /> },
-  { id: 'shopping', label: 'Shopping', icon: <FiPackage className="w-4 h-4" /> },
-  { id: 'nature', label: 'Nature', icon: <FiStar className="w-4 h-4" /> },
-  { id: 'nightlife', label: 'Nightlife', icon: <FiZap className="w-4 h-4" /> },
-  { id: 'history', label: 'History', icon: <FiSearch className="w-4 h-4" /> },
+  { id: 'beach', label: 'Beach & Nature', icon: <FiSun className="w-4 h-4" /> },
+  { id: 'culture', label: 'Culture & History', icon: <FiCamera className="w-4 h-4" /> },
+  { id: 'food', label: 'Food & Nightlife', icon: <FiHeart className="w-4 h-4" /> },
+  { id: 'adventure', label: 'Adventure & Sports', icon: <FiMapPin className="w-4 h-4" /> },
 ];
 
-const COMPANION_OPTIONS = [
-  { id: 'solo', label: 'Solo' },
-  { id: 'couple', label: 'Couple' },
-  { id: 'family', label: 'Family' },
-  { id: 'friends', label: 'Friends' },
+const TRAVEL_VIBE_OPTIONS = [
+  {
+    id: 'budget',
+    label: 'Budget Explorer',
+    desc: 'Economy flights, 3-star stays',
+    icon: <FiDollarSign className="w-6 h-6" />,
+    cabin: 'ECONOMY', hotel_star: 3, budget_level: 'budget',
+  },
+  {
+    id: 'comfort',
+    label: 'Comfort Seeker',
+    desc: 'Economy flights, 4-star stays',
+    icon: <FiHeart className="w-6 h-6" />,
+    cabin: 'ECONOMY', hotel_star: 4, budget_level: 'moderate',
+  },
+  {
+    id: 'luxury',
+    label: 'Luxury Traveler',
+    desc: 'Business class, 5-star stays',
+    icon: <FiStar className="w-6 h-6" />,
+    cabin: 'BUSINESS', hotel_star: 5, budget_level: 'luxury',
+  },
+  {
+    id: 'mixed',
+    label: 'Surprise Me',
+    desc: 'System learns from your trips',
+    icon: <FiZap className="w-6 h-6" />,
+    cabin: '', hotel_star: 0, budget_level: 'moderate',
+  },
 ];
 
-const ACCOMMODATION_OPTIONS = [
-  { id: 'hotel', label: 'Hotel' },
-  { id: 'resort', label: 'Resort' },
-  { id: 'hostel', label: 'Hostel' },
-];
-
-const FREQUENCY_OPTIONS = [
-  { id: 'rarely', label: 'Rarely (0-1/year)' },
-  { id: 'sometimes', label: 'Sometimes (2-3/year)' },
-  { id: 'often', label: 'Often (4+/year)' },
-];
-
-const AIRLINE_OPTIONS = [
-  { id: 'AI', label: 'Air India' },
-  { id: '6E', label: 'IndiGo' },
-  { id: 'UK', label: 'Vistara' },
-  { id: 'EK', label: 'Emirates' },
-  { id: 'QR', label: 'Qatar Airways' },
-  { id: 'SQ', label: 'Singapore Airlines' },
-  { id: 'BA', label: 'British Airways' },
-  { id: 'LH', label: 'Lufthansa' },
-];
-
-const ONBOARDING_STEPS = 5;
+const ONBOARDING_STEPS = 3;
 
 const TIER_STYLES: Record<string, { border: string; badge: string; glow: string; accent: string }> = {
   budget: {
@@ -91,6 +89,40 @@ const TIER_STYLES: Record<string, { border: string; badge: string; glow: string;
 
 function formatINR(amount: number): string {
   return new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(amount);
+}
+
+function formatDuration(iso: string): string {
+  if (!iso) return '';
+  const match = iso.match(/PT(?:(\d+)H)?(?:(\d+)M)?/);
+  if (!match) return iso;
+  const h = match[1] ? `${match[1]}h` : '';
+  const m = match[2] ? ` ${match[2]}m` : '';
+  return `${h}${m}`.trim();
+}
+
+function formatFlightTime(time: string): string {
+  if (!time) return '';
+  // Handle ISO datetime "2026-03-19T14:30:00" or just "14:30"
+  const tIdx = time.indexOf('T');
+  const timePart = tIdx >= 0 ? time.slice(tIdx + 1, tIdx + 6) : time.slice(0, 5);
+  return timePart;
+}
+
+function formatTravelDate(dateStr: string): string {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'T00:00:00');
+  return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+}
+
+function formatTravelDateRange(dep: string, ret: string): string {
+  if (!dep) return '';
+  const depDate = new Date(dep + 'T00:00:00');
+  const retDate = ret ? new Date(ret + 'T00:00:00') : null;
+  const depStr = depDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+  if (!retDate) return depStr;
+  const retStr = retDate.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  const days = Math.round((retDate.getTime() - depDate.getTime()) / (1000 * 60 * 60 * 24));
+  return `${depStr} — ${retStr} · ${days} days`;
 }
 
 function DataSourceBadge({ source }: { source?: string }) {
@@ -137,6 +169,11 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [bookingCount, setBookingCount] = useState(0);
   const [resolvedOrigin, setResolvedOrigin] = useState<{ iata: string; source: string } | null>(null);
 
+  // Travel dates + LLM status
+  const [departureDate, setDepartureDate] = useState<string | null>(null);
+  const [returnDate, setReturnDate] = useState<string | null>(null);
+  const [llmAvailable, setLlmAvailable] = useState(true);
+
   // Save trip state
   const [savingTier, setSavingTier] = useState<string | null>(null);
   const [savedTiers, setSavedTiers] = useState<Set<string>>(new Set());
@@ -145,6 +182,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [progressPercent, setProgressPercent] = useState(0);
   const [progressMessage, setProgressMessage] = useState('');
   const [progressStep, setProgressStep] = useState('');
+  const [progressHistory, setProgressHistory] = useState<Array<{ step: string; message: string }>>([]);
   const [abortStream, setAbortStream] = useState<(() => void) | null>(null);
 
   // Natural language input
@@ -157,17 +195,12 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
   const [onboardingStep, setOnboardingStep] = useState(1);
   const [autoGenerateAfterOnboarding, setAutoGenerateAfterOnboarding] = useState(false);
   const [profileReady, setProfileReady] = useState(false); // returning user with prefs
-  const [companions, setCompanions] = useState('');
-  const [accommodation, setAccommodation] = useState('hotel');
-  const [dreamDestinations, setDreamDestinations] = useState('');
-  const [budgetMin, setBudgetMin] = useState(20000);
-  const [budgetMax, setBudgetMax] = useState(100000);
-  const [travelFrequency, setTravelFrequency] = useState('');
-  const [preferredAirlines, setPreferredAirlines] = useState<string[]>([]);
-  const [dietaryNeeds, setDietaryNeeds] = useState('');
-  const [accessibilityNeeds, setAccessibilityNeeds] = useState('');
+  const [travelVibe, setTravelVibe] = useState('');
+  const [homeAirport, setHomeAirport] = useState('');
+  const [profileDefaults, setProfileDefaults] = useState<ProfileDefaults | null>(null);
+  const [suggestions, setSuggestions] = useState<SuggestedDestination[]>([]);
 
-  // Check onboarding status on mount
+  // Check onboarding status on mount + fetch profile defaults
   useEffect(() => {
     if (isAuth && !onboardingChecked) {
       getOnboardingStatus()
@@ -175,8 +208,14 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
           if (!status.onboarding_completed) {
             setShowOnboarding(true);
           } else if (status.has_preferences) {
-            // Returning user with completed profile — mark ready for auto-suggest
             setProfileReady(true);
+            // Fetch inferred defaults + suggestions for returning user
+            getProfileDefaults()
+              .then(setProfileDefaults)
+              .catch(() => {});
+            getSuggestedDestinations()
+              .then(setSuggestions)
+              .catch(() => {});
           }
           setOnboardingChecked(true);
         })
@@ -199,32 +238,19 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
     );
   };
 
-  const toggleAirline = (id: string) => {
-    setPreferredAirlines((prev) =>
-      prev.includes(id) ? prev.filter((a) => a !== id) : [...prev, id]
-    );
-  };
-
   const handleSaveOnboarding = async () => {
+    // Map travel vibe to concrete preferences
+    const vibeConfig = TRAVEL_VIBE_OPTIONS.find(v => v.id === travelVibe);
     try {
       await savePreferences({
         interests: selectedInterests,
-        budget_level: budgetLevel,
-        travel_style: 'mixed',
-        preferred_destinations: dreamDestinations ? dreamDestinations.split(',').map(d => d.trim()) : [],
-        travel_companions: companions || undefined,
-        accommodation_preference: accommodation,
-        budget_range_min: budgetMin,
-        budget_range_max: budgetMax,
-        travel_frequency: travelFrequency || undefined,
-        preferred_airlines: preferredAirlines.length > 0 ? preferredAirlines : undefined,
-        dietary_needs: dietaryNeeds ? dietaryNeeds.split(',').map(d => d.trim()) : undefined,
-        accessibility_needs: accessibilityNeeds ? accessibilityNeeds.split(',').map(d => d.trim()) : undefined,
+        budget_level: vibeConfig?.budget_level || 'moderate',
+        travel_style: travelVibe === 'mixed' ? 'mixed' : 'mixed',
+        accommodation_preference: vibeConfig && vibeConfig.hotel_star >= 5 ? 'resort' : 'hotel',
         onboarding_step: ONBOARDING_STEPS,
       });
       setShowOnboarding(false);
       setOnboardingStep(1);
-      // Auto-generate personalized packages based on saved preferences
       setAutoGenerateAfterOnboarding(true);
     } catch {
       setShowOnboarding(false);
@@ -245,6 +271,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
     setProgressPercent(0);
     setProgressMessage('Starting...');
     setProgressStep('');
+    setProgressHistory([]);
 
     const requestPayload = {
       destination: destination || undefined,
@@ -264,6 +291,13 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
         setProgressPercent(event.percent);
         setProgressMessage(event.message);
         setProgressStep(event.step);
+        setProgressHistory(prev => {
+          // Only add if step changed or message is new
+          if (prev.length === 0 || prev[prev.length - 1].message !== event.message) {
+            return [...prev, { step: event.step, message: event.message }];
+          }
+          return prev;
+        });
       },
       // onComplete
       (result: AutoPackageResponse) => {
@@ -275,6 +309,9 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
           setAmadeusStats(result.amadeus_data || null);
           setBookingCount(result.booking_count || 0);
           setResolvedOrigin(result.resolved_origin || null);
+          setDepartureDate(result.departure_date || null);
+          setReturnDate(result.return_date || null);
+          setLlmAvailable(result.llm_available !== false);
           setSavedTiers(new Set()); // Reset for new packages
         } else {
           setError(result.error || 'No packages generated');
@@ -304,7 +341,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
       transition={{ duration: 0.8, delay: 0.3 }}
       className="mt-16 max-w-7xl mx-auto"
     >
-      {/* Multi-Step Onboarding Wizard */}
+      {/* Streamlined 3-Question Onboarding */}
       <AnimatePresence>
         {showOnboarding && (
           <motion.div
@@ -338,196 +375,78 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
               </div>
 
               <div className="text-center mb-6">
-                <FiUsers className="w-10 h-10 text-gold-400 mx-auto mb-3" />
                 <h3 className="text-xl font-display font-bold text-white">
-                  {onboardingStep === 1 && 'What interests you?'}
-                  {onboardingStep === 2 && 'Budget & Travel Companions'}
-                  {onboardingStep === 3 && 'Travel Habits & Airlines'}
-                  {onboardingStep === 4 && 'Special Needs'}
-                  {onboardingStep === 5 && 'Dream Destinations'}
+                  {onboardingStep === 1 && "What's your travel vibe?"}
+                  {onboardingStep === 2 && 'What do you love?'}
+                  {onboardingStep === 3 && 'Where do you fly from?'}
                 </h3>
-                <p className="text-premium-mist/60 text-sm mt-1">Step {onboardingStep} of {ONBOARDING_STEPS}</p>
+                <p className="text-premium-mist/60 text-sm mt-1">
+                  {onboardingStep === 1 && 'We\'ll personalize everything for you'}
+                  {onboardingStep === 2 && 'Pick your favorite travel experiences'}
+                  {onboardingStep === 3 && 'Your home airport for departure'}
+                </p>
               </div>
 
-              {/* Step 1: Interests */}
+              {/* Step 1: Travel Vibe — 4 visual cards */}
               {onboardingStep === 1 && (
-                <div className="mb-6">
-                  <div className="flex flex-wrap gap-2">
-                    {INTEREST_OPTIONS.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => toggleInterest(opt.id)}
-                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
-                          selectedInterests.includes(opt.id)
-                            ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                            : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                        }`}
-                      >
-                        {opt.icon} {opt.label}
-                      </button>
-                    ))}
-                  </div>
+                <div className="grid grid-cols-2 gap-3 mb-6">
+                  {TRAVEL_VIBE_OPTIONS.map((vibe) => (
+                    <button
+                      key={vibe.id}
+                      type="button"
+                      onClick={() => { setTravelVibe(vibe.id); setBudgetLevel(vibe.budget_level); }}
+                      className={`flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${
+                        travelVibe === vibe.id
+                          ? 'bg-gold-500/15 border-gold-500/60 text-gold-400 shadow-[0_0_15px_rgba(249,178,51,0.15)]'
+                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                      }`}
+                    >
+                      <span className={travelVibe === vibe.id ? 'text-gold-400' : 'text-premium-mist/50'}>{vibe.icon}</span>
+                      <span className="font-semibold text-sm">{vibe.label}</span>
+                      <span className="text-xs opacity-70">{vibe.desc}</span>
+                    </button>
+                  ))}
                 </div>
               )}
 
-              {/* Step 2: Budget + Companions */}
+              {/* Step 2: Interests — 4 toggle pills */}
               {onboardingStep === 2 && (
-                <div className="space-y-5 mb-6">
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                      <FiDollarSign className="inline mr-1" /> Budget Range (INR)
-                    </label>
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="number"
-                        value={budgetMin}
-                        onChange={(e) => setBudgetMin(parseInt(e.target.value) || 0)}
-                        placeholder="Min"
-                        className="flex-1 px-3 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                      />
-                      <span className="text-premium-mist/40">to</span>
-                      <input
-                        type="number"
-                        value={budgetMax}
-                        onChange={(e) => setBudgetMax(parseInt(e.target.value) || 0)}
-                        placeholder="Max"
-                        className="flex-1 px-3 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                      <FiUsers className="inline mr-1" /> Who do you travel with?
-                    </label>
-                    <div className="flex gap-2">
-                      {COMPANION_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setCompanions(opt.id)}
-                          className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                            companions === opt.id
-                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                <div className="flex flex-wrap gap-3 justify-center mb-6">
+                  {INTEREST_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => toggleInterest(opt.id)}
+                      className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-medium transition-all ${
+                        selectedInterests.includes(opt.id)
+                          ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
+                          : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
+                      }`}
+                    >
+                      {opt.icon} {opt.label}
+                    </button>
+                  ))}
                 </div>
               )}
 
-              {/* Step 3: Travel frequency + Preferred airlines */}
+              {/* Step 3: Home Airport — dropdown */}
               {onboardingStep === 3 && (
-                <div className="space-y-5 mb-6">
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                      <FiCalendar className="inline mr-1" /> How often do you travel?
-                    </label>
-                    <div className="flex gap-2">
-                      {FREQUENCY_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setTravelFrequency(opt.id)}
-                          className={`px-3 py-2 rounded-lg border text-xs font-medium transition-all ${
-                            travelFrequency === opt.id
-                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Preferred Airlines</label>
-                    <div className="flex flex-wrap gap-2">
-                      {AIRLINE_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => toggleAirline(opt.id)}
-                          className={`px-3 py-1.5 rounded-full border text-xs font-medium transition-all ${
-                            preferredAirlines.includes(opt.id)
-                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Step 4: Dietary + Accessibility */}
-              {onboardingStep === 4 && (
-                <div className="space-y-5 mb-6">
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Dietary Needs (comma-separated, optional)</label>
-                    <input
-                      type="text"
-                      value={dietaryNeeds}
-                      onChange={(e) => setDietaryNeeds(e.target.value)}
-                      placeholder="e.g. Vegetarian, Vegan, Halal, Gluten-free"
-                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">Accessibility Needs (comma-separated, optional)</label>
-                    <input
-                      type="text"
-                      value={accessibilityNeeds}
-                      onChange={(e) => setAccessibilityNeeds(e.target.value)}
-                      placeholder="e.g. Wheelchair access, Elevator required"
-                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                    />
-                  </div>
-                </div>
-              )}
-
-              {/* Step 5: Dream destinations + Accommodation */}
-              {onboardingStep === 5 && (
-                <div className="space-y-5 mb-6">
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                      <FiMapPin className="inline mr-1" /> Dream destinations (comma-separated)
-                    </label>
-                    <input
-                      type="text"
-                      value={dreamDestinations}
-                      onChange={(e) => setDreamDestinations(e.target.value)}
-                      placeholder="e.g. Paris, Tokyo, Bali"
-                      className="w-full px-4 py-2.5 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm placeholder-premium-mist/40 focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-semibold text-premium-mist/80 mb-2">
-                      <FiHome className="inline mr-1" /> Preferred accommodation
-                    </label>
-                    <div className="flex gap-2">
-                      {ACCOMMODATION_OPTIONS.map((opt) => (
-                        <button
-                          key={opt.id}
-                          type="button"
-                          onClick={() => setAccommodation(opt.id)}
-                          className={`px-4 py-2 rounded-lg border text-sm font-medium transition-all ${
-                            accommodation === opt.id
-                              ? 'bg-gold-500/20 border-gold-500/50 text-gold-400'
-                              : 'bg-premium-surface/30 border-premium-border/50 text-premium-mist/60 hover:border-gold-500/30'
-                          }`}
-                        >
-                          {opt.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
+                <div className="mb-6">
+                  <select
+                    value={homeAirport || originIata}
+                    onChange={(e) => setHomeAirport(e.target.value)}
+                    className="w-full px-4 py-3 bg-premium-surface/50 border border-premium-border rounded-xl text-white text-sm focus:border-gold-500 focus:ring-2 focus:ring-gold-500/20 transition-all outline-none appearance-none"
+                  >
+                    <option value="">Select your home airport</option>
+                    {airports.map((a) => (
+                      <option key={a.iata} value={a.iata}>
+                        {a.iata} — {a.city}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="text-premium-mist/40 text-xs mt-2 text-center">
+                    We auto-detected {originIata}. Change if needed.
+                  </p>
                 </div>
               )}
 
@@ -553,7 +472,7 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                     onClick={handleSaveOnboarding}
                     className="flex-1 px-6 py-3 bg-gradient-gold rounded-xl font-display font-bold text-navy-950 hover:scale-[1.02] transition-transform"
                   >
-                    Save & Start Exploring
+                    Start Exploring
                   </button>
                 )}
               </div>
@@ -561,6 +480,42 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Smart destination suggestions for returning users */}
+      {profileReady && suggestions.length > 0 && packages.length === 0 && !isLoading && (
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="mb-6"
+        >
+          <p className="text-premium-mist/50 text-sm mb-3">Based on your travel style:</p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {suggestions.map((dest) => (
+              <button
+                key={dest.iata}
+                onClick={() => {
+                  setNlQuery(dest.city);
+                  setDuration(dest.days);
+                  // Short delay then generate
+                  setTimeout(() => handleGenerate(), 100);
+                }}
+                className="group flex items-center gap-3 p-4 rounded-xl bg-gradient-glass border border-premium-border/50 hover:border-gold-500/30 transition-all text-left"
+              >
+                <span className="text-2xl">{dest.emoji}</span>
+                <div className="flex-1 min-w-0">
+                  <span className="font-display font-bold text-white group-hover:text-gold-400 transition-colors">
+                    {dest.city}
+                  </span>
+                  <span className="block text-xs text-premium-mist/50">
+                    {dest.days} days · ~INR {Math.round(dest.budget_est / 1000)}K
+                  </span>
+                </div>
+              </button>
+            ))}
+          </div>
+          <p className="text-premium-mist/30 text-xs mt-2 text-center">Or tell us where you want to go</p>
+        </motion.div>
+      )}
 
       <div className="bg-gradient-glass backdrop-blur-2xl rounded-luxury border border-gold-500/20 shadow-luxury overflow-hidden">
         {/* Gold top border */}
@@ -661,9 +616,31 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                   type="text"
                   value={nlQuery}
                   onChange={(e) => setNlQuery(e.target.value)}
-                  placeholder="e.g. I want a relaxing beach vacation in Goa for a week under 50k..."
+                  placeholder={profileReady
+                    ? "Where to next? Try 'Dubai' or 'beach vacation in Thailand'"
+                    : "e.g. I want a relaxing beach vacation in Goa for a week under 50k..."}
                   className="w-full pl-12 pr-4 py-4 bg-premium-surface/50 border-2 border-premium-border rounded-xl text-white font-medium placeholder-premium-mist/40 focus:border-gold-500 focus:ring-4 focus:ring-gold-500/20 transition-all duration-300 outline-none text-lg"
                 />
+              </div>
+            )}
+
+            {/* Inferred defaults for returning users */}
+            {profileReady && profileDefaults && useNL && (
+              <div className="flex flex-wrap items-center gap-2 mt-3 text-xs text-premium-mist/40">
+                <span>{profileDefaults.duration_days} days</span>
+                <span className="text-premium-mist/20">·</span>
+                <span>{profileDefaults.cabin_preference === 'BUSINESS' ? 'Business' : 'Economy'}</span>
+                <span className="text-premium-mist/20">·</span>
+                <span>{profileDefaults.hotel_star_preference}★ hotel</span>
+                <span className="text-premium-mist/20">·</span>
+                <span>from {profileDefaults.origin_iata}</span>
+                {profileDefaults.budget_min && profileDefaults.budget_max && (
+                  <>
+                    <span className="text-premium-mist/20">·</span>
+                    <span>INR {Math.round(profileDefaults.budget_min / 1000)}K—{Math.round(profileDefaults.budget_max / 1000)}K</span>
+                  </>
+                )}
+                <span className="text-premium-mist/20 ml-1">— auto-inferred from your profile</span>
               </div>
             )}
           </div>
@@ -776,40 +753,47 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
             </span>
           </motion.button>
 
-          {/* Progress bar */}
+          {/* Storytelling progress checklist */}
           <AnimatePresence>
-            {isLoading && progressPercent > 0 && (
+            {isLoading && progressHistory.length > 0 && (
               <motion.div
                 initial={{ opacity: 0, y: -10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -10 }}
-                className="mt-4"
+                className="mt-4 space-y-1.5"
               >
-                <div className="flex items-center justify-between mb-2">
-                  <span className="text-xs text-premium-mist/60 font-medium">{progressMessage}</span>
-                  <span className="text-xs text-gold-400 font-bold">{progressPercent}%</span>
-                </div>
-                <div className="h-2 bg-premium-surface/50 rounded-full overflow-hidden border border-premium-border/30">
+                {progressHistory.map((item, i) => {
+                  const isLast = i === progressHistory.length - 1;
+                  return (
+                    <motion.div
+                      key={i}
+                      initial={{ opacity: 0, x: -10 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      className="flex items-center gap-2 text-sm"
+                    >
+                      {isLast ? (
+                        <motion.div
+                          className="w-4 h-4 border-2 border-gold-400 border-t-transparent rounded-full flex-shrink-0"
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+                        />
+                      ) : (
+                        <FiCheck className="w-4 h-4 text-green-400 flex-shrink-0" />
+                      )}
+                      <span className={isLast ? 'text-gold-400 font-medium' : 'text-premium-mist/50'}>
+                        {item.message}
+                      </span>
+                    </motion.div>
+                  );
+                })}
+                {/* Progress bar underneath */}
+                <div className="h-1 bg-premium-surface/50 rounded-full overflow-hidden mt-2">
                   <motion.div
                     className="h-full bg-gradient-gold rounded-full"
                     initial={{ width: 0 }}
                     animate={{ width: `${progressPercent}%` }}
                     transition={{ duration: 0.5, ease: 'easeOut' }}
                   />
-                </div>
-                <div className="flex justify-between mt-2 text-[10px] text-premium-mist/40">
-                  <span className={progressStep === 'nlp' || progressStep === 'profile' ? 'text-gold-400 font-bold' : ''}>
-                    Parse & Profile
-                  </span>
-                  <span className={progressStep === 'flights' || progressStep === 'hotels' || progressStep === 'activities' ? 'text-gold-400 font-bold' : ''}>
-                    Amadeus Data
-                  </span>
-                  <span className={progressStep === 'ai' || progressStep === 'validate' ? 'text-gold-400 font-bold' : ''}>
-                    AI Curation
-                  </span>
-                  <span className={progressStep === 'done' ? 'text-gold-400 font-bold' : ''}>
-                    Done
-                  </span>
                 </div>
               </motion.div>
             )}
@@ -883,6 +867,43 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                 </motion.div>
               )}
 
+              {/* Travel dates banner */}
+              {departureDate && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-4 p-3 bg-premium-surface/30 border border-premium-mist/10 rounded-xl flex items-center gap-3 text-sm"
+                >
+                  <FiCalendar className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                  <span className="text-white font-semibold">
+                    {formatTravelDateRange(departureDate, returnDate || '')}
+                  </span>
+                </motion.div>
+              )}
+
+              {/* LLM unavailable banner */}
+              {!llmAvailable && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="mb-4 p-2.5 bg-amber-500/5 border border-amber-500/15 rounded-xl flex items-center gap-2 text-xs text-amber-400/80"
+                >
+                  <FiZap className="w-3.5 h-3.5 flex-shrink-0" />
+                  Packages built from real-time data. AI narrative temporarily unavailable.
+                </motion.div>
+              )}
+
+              {/* Personalization note */}
+              {note && llmAvailable && (
+                <motion.div
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="mb-6 p-3 bg-premium-surface/20 border border-premium-mist/10 rounded-xl text-sm text-premium-mist/60 italic"
+                >
+                  {note}
+                </motion.div>
+              )}
+
               {/* Tier filter tabs */}
               <div className="flex gap-2 mb-8">
                 {[
@@ -903,6 +924,32 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                     {tab.label}
                   </button>
                 ))}
+              </div>
+
+              {/* Quick refine bar */}
+              <div className="flex flex-wrap items-center gap-2 mb-6">
+                <span className="text-xs text-premium-mist/40 mr-1">Refine:</span>
+                <button
+                  onClick={() => setDuration(d => d + 1)}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-premium-surface/30 border border-premium-border/50 text-premium-mist/60 hover:text-gold-400 hover:border-gold-500/30 transition-all disabled:opacity-40"
+                >
+                  +1 day
+                </button>
+                <button
+                  onClick={() => setDuration(d => Math.max(2, d - 1))}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-premium-surface/30 border border-premium-border/50 text-premium-mist/60 hover:text-gold-400 hover:border-gold-500/30 transition-all disabled:opacity-40"
+                >
+                  -1 day
+                </button>
+                <button
+                  onClick={handleGenerate}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gold-500/10 border border-gold-500/30 text-gold-400 hover:bg-gold-500/20 transition-all disabled:opacity-40"
+                >
+                  Regenerate
+                </button>
               </div>
 
               {/* Package cards */}
@@ -949,21 +996,69 @@ export default function AutoPackageSection({ originIata, airports, isAuthenticat
                         </div>
 
                         {/* Flight info */}
-                        <div className="p-3 bg-premium-surface/40 rounded-xl mb-3">
-                          <div className="flex items-center justify-between mb-1">
-                            <span className="text-sm font-semibold text-white">
-                              {pkg.flights.airline_name || pkg.flights.travel_class.replace('_', ' ')}
-                            </span>
-                            <DataSourceBadge source={pkg.flights.data_source} />
+                        <div className="p-3 bg-premium-surface/40 rounded-xl mb-3 space-y-2">
+                          {/* Outbound */}
+                          <div>
+                            <div className="flex items-center justify-between mb-1">
+                              <span className="text-sm font-semibold text-white">
+                                {pkg.flights.airline_name || pkg.flights.travel_class.replace('_', ' ')}
+                              </span>
+                              <DataSourceBadge source={pkg.flights.data_source} />
+                            </div>
+                            <div className="flex items-center justify-between text-xs text-premium-mist/50">
+                              <span>
+                                {pkg.flights.flight_number && `${pkg.flights.flight_number} · `}
+                                {pkg.flights.travel_class.replace('_', ' ')}
+                                {pkg.flights.stops !== undefined && ` · ${pkg.flights.stops} stop${pkg.flights.stops !== 1 ? 's' : ''}`}
+                              </span>
+                              <span>~INR {formatINR(flightPrice)}</span>
+                            </div>
+                            {/* Duration + times */}
+                            {(pkg.flights.duration || pkg.flights.departure_time) && (
+                              <div className="flex items-center gap-2 text-[11px] text-premium-mist/40 mt-1">
+                                {pkg.flights.departure_time && (
+                                  <span>{formatFlightTime(pkg.flights.departure_time)}</span>
+                                )}
+                                {pkg.flights.duration && (
+                                  <span className="flex items-center gap-1">
+                                    <FiClock className="w-2.5 h-2.5" />
+                                    {formatDuration(pkg.flights.duration)}
+                                  </span>
+                                )}
+                                {pkg.flights.arrival_time && (
+                                  <span>→ {formatFlightTime(pkg.flights.arrival_time)}</span>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <div className="flex items-center justify-between text-xs text-premium-mist/50">
-                            <span>
-                              {pkg.flights.flight_number && `${pkg.flights.flight_number} · `}
-                              {pkg.flights.travel_class.replace('_', ' ')}
-                              {pkg.flights.stops !== undefined && ` · ${pkg.flights.stops} stop${pkg.flights.stops !== 1 ? 's' : ''}`}
-                            </span>
-                            <span>~INR {formatINR(flightPrice)}</span>
-                          </div>
+                          {/* Return flight */}
+                          {pkg.flights.return_flight_number && (
+                            <div className="pt-2 border-t border-premium-mist/10">
+                              <div className="flex items-center justify-between text-xs text-premium-mist/50">
+                                <span>
+                                  Return: {pkg.flights.return_airline_name || pkg.flights.return_carrier}{' '}
+                                  {pkg.flights.return_flight_number}
+                                  {pkg.flights.return_stops !== undefined && ` · ${pkg.flights.return_stops} stop${pkg.flights.return_stops !== 1 ? 's' : ''}`}
+                                </span>
+                              </div>
+                              {(pkg.flights.return_duration || pkg.flights.return_departure_time) && (
+                                <div className="flex items-center gap-2 text-[11px] text-premium-mist/40 mt-0.5">
+                                  {pkg.flights.return_departure_time && (
+                                    <span>{formatFlightTime(pkg.flights.return_departure_time)}</span>
+                                  )}
+                                  {pkg.flights.return_duration && (
+                                    <span className="flex items-center gap-1">
+                                      <FiClock className="w-2.5 h-2.5" />
+                                      {formatDuration(pkg.flights.return_duration)}
+                                    </span>
+                                  )}
+                                  {pkg.flights.return_arrival_time && (
+                                    <span>→ {formatFlightTime(pkg.flights.return_arrival_time)}</span>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          )}
                         </div>
 
                         {/* Hotel info */}

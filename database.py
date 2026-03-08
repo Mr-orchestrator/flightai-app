@@ -131,19 +131,23 @@ class UserPreferences(Base):
 
 
 class PackageSnapshot(Base):
-    """Stores selected offer IDs for booking revalidation."""
+    """Stores selected offer IDs + full package JSON for My Trips."""
     __tablename__ = "package_snapshots"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
     tier = Column(String(20), nullable=False)
     destination_iata = Column(String(3), nullable=False)
+    destination_city = Column(String(255), nullable=True)
+    departure_date = Column(String(10), nullable=True)
+    return_date = Column(String(10), nullable=True)
     flight_offer_id = Column(String(100), nullable=True)
     hotel_offer_id = Column(String(100), nullable=True)
     activity_ids = Column(JSON, default=list)
     flight_price_inr = Column(Integer, nullable=True)
     hotel_total_inr = Column(Integer, nullable=True)
     total_package_inr = Column(Integer, nullable=True)
+    package_json = Column(JSON, nullable=True)  # Full package data for trip detail
     fx_rate_used = Column(String(50), nullable=True)  # e.g. "USD_TO_INR=83.5"
     created_at = Column(DateTime, default=datetime.utcnow)
     flight_expires_at = Column(DateTime, nullable=True)   # +15 min

@@ -5,9 +5,10 @@
 
 'use client';
 
-import { motion } from 'framer-motion';
+import { useState } from 'react';
+import { motion, AnimatePresence } from 'framer-motion';
 import { navbarSlide } from '@/lib/motion';
-import { FiUser, FiPhone, FiMap, FiPackage, FiLogOut } from 'react-icons/fi';
+import { FiUser, FiPhone, FiMap, FiPackage, FiLogOut, FiMenu, FiX } from 'react-icons/fi';
 
 interface NavbarProps {
   isAuthenticated?: boolean;
@@ -16,6 +17,8 @@ interface NavbarProps {
 }
 
 export default function Navbar({ isAuthenticated = false, userName, onLogout }: NavbarProps) {
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
   return (
     <motion.nav
       className="fixed top-0 left-0 right-0 z-50 bg-gradient-to-b from-premium-bg/95 to-transparent backdrop-blur-xl border-b border-premium-border/50"
@@ -84,7 +87,7 @@ export default function Navbar({ isAuthenticated = false, userName, onLogout }: 
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.8, delay: 0.3 }}
           >
-            <NavLink icon={<FiMap />} label="My Trips" href="/" />
+            <NavLink icon={<FiMap />} label="My Trips" href="/trips" />
             <NavLink icon={<FiPackage />} label="Packages" href="/#packages" />
             <NavLink icon={<FiPhone />} label="Support" href="#" />
 
@@ -117,7 +120,61 @@ export default function Navbar({ isAuthenticated = false, userName, onLogout }: 
               </div>
             )}
           </motion.div>
+
+          {/* Mobile hamburger button */}
+          <button
+            onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+            className="md:hidden flex items-center justify-center w-10 h-10 rounded-xl bg-premium-surface/50 border border-premium-border text-premium-mist/70 hover:text-gold-400 transition-colors"
+            aria-label="Toggle menu"
+          >
+            {mobileMenuOpen ? <FiX className="w-5 h-5" /> : <FiMenu className="w-5 h-5" />}
+          </button>
         </div>
+
+        {/* Mobile menu dropdown */}
+        <AnimatePresence>
+          {mobileMenuOpen && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              transition={{ duration: 0.2 }}
+              className="md:hidden overflow-hidden"
+            >
+              <div className="py-4 space-y-2 border-t border-premium-border/30 mt-2">
+                <MobileNavLink icon={<FiMap />} label="My Trips" href="/trips" onClick={() => setMobileMenuOpen(false)} />
+                <MobileNavLink icon={<FiPackage />} label="Packages" href="/#packages" onClick={() => setMobileMenuOpen(false)} />
+                <MobileNavLink icon={<FiPhone />} label="Support" href="#" onClick={() => setMobileMenuOpen(false)} />
+
+                {isAuthenticated ? (
+                  <div className="pt-2 border-t border-premium-border/20 mt-2 space-y-2">
+                    <div className="text-sm text-premium-mist/70 px-3">
+                      Hi, <span className="text-gold-400 font-semibold">{userName || 'Traveler'}</span>
+                    </div>
+                    <button
+                      onClick={() => { setMobileMenuOpen(false); onLogout?.(); }}
+                      className="flex items-center gap-2 w-full px-3 py-2 rounded-xl text-premium-mist/70 hover:text-red-400 transition-colors"
+                    >
+                      <FiLogOut className="w-4 h-4" />
+                      <span>Logout</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="pt-2 border-t border-premium-border/20 mt-2">
+                    <a
+                      href="/auth"
+                      onClick={() => setMobileMenuOpen(false)}
+                      className="flex items-center gap-2 px-3 py-2 rounded-xl text-gold-400 font-semibold"
+                    >
+                      <FiUser className="w-4 h-4" />
+                      <span>Sign In</span>
+                    </a>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
 
       {/* Bottom glow line */}
@@ -156,5 +213,19 @@ function NavLink({ icon, label, href }: NavLinkProps) {
         transition={{ duration: 0.3 }}
       />
     </motion.a>
+  );
+}
+
+// Mobile Navigation Link Component
+function MobileNavLink({ icon, label, href, onClick }: NavLinkProps & { onClick: () => void }) {
+  return (
+    <a
+      href={href}
+      onClick={onClick}
+      className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-premium-mist/70 hover:text-gold-400 hover:bg-premium-surface/30 transition-colors"
+    >
+      <span className="text-lg">{icon}</span>
+      <span className="font-medium">{label}</span>
+    </a>
   );
 }

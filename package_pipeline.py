@@ -44,6 +44,14 @@ class NormalizedFlight:
     arrival_time: str
     data_source: str
     offer_id: Optional[str] = None
+    # Return flight fields
+    return_carrier: str = ""
+    return_airline_name: str = ""
+    return_flight_number: str = ""
+    return_duration: str = ""
+    return_stops: int = 0
+    return_departure_time: str = ""
+    return_arrival_time: str = ""
 
     @property
     def sort_key(self):
@@ -192,6 +200,13 @@ def normalize_amadeus_data(
             arrival_time=f.get("arrival_time", ""),
             data_source=f.get("data_source", "amadeus"),
             offer_id=f.get("offer_id"),
+            return_carrier=f.get("return_carrier", ""),
+            return_airline_name=f.get("return_airline_name", ""),
+            return_flight_number=f.get("return_flight_number", ""),
+            return_duration=f.get("return_duration", ""),
+            return_stops=f.get("return_stops", 0),
+            return_departure_time=f.get("return_departure_time", ""),
+            return_arrival_time=f.get("return_arrival_time", ""),
         ))
     norm_flights.sort(key=lambda f: f.sort_key)
     norm_flights = norm_flights[:max_flights]
@@ -286,45 +301,91 @@ def normalize_amadeus_data(
 # ==================== LAYER 2: DETERMINISTIC TIER BUILDER ====================
 
 
-def _pick_flight(flights: list[NormalizedFlight], tier: str) -> Optional[NormalizedFlight]:
-    """Pick flight for a tier. Deterministic."""
+def _pick_flight(flights: list[NormalizedFlight], tier: str,
+                 preferences: Optional[dict] = None) -> Optional[NormalizedFlight]:
+    """Pick flight for a tier. Preference-driven, then deterministic.
+
+    If user has cabin_preference → ALL tiers prefer that cabin.
+    If user has preferred_airlines → narrow pool to those airlines.
+    Within the filtered pool, pick by tier price position.
+    """
     if not flights:
         return None
 
-    economy = [f for f in flights if f.cabin == "ECONOMY"]
-    business = [f for f in flights if f.cabin == "BUSINESS"]
+    cabin_pref = preferences.get("cabin_preference") if preferences else None
+    preferred_airlines = preferences.get("preferred_airlines", []) if preferences else []
 
+    # Step 1: Filter by inferred cabin preference
+    pool = flights
+    if cabin_pref:
+        cabin_matches = [f for f in flights if f.cabin == cabin_pref]
+        if cabin_matches:
+            pool = cabin_matches
+    else:
+        # No preference: use original tier-based cabin logic
+        economy = [f for f in flights if f.cabin == "ECONOMY"]
+        business = [f for f in flights if f.cabin == "BUSINESS"]
+        if tier == "premium" and business:
+            pool = business
+        elif economy:
+            pool = economy
+
+    # Step 2: Narrow by preferred airlines (if any)
+    if preferred_airlines:
+        airline_matches = [f for f in pool if f.carrier in preferred_airlines]
+        if airline_matches:
+            pool = airline_matches
+
+    # Step 3: Pick by tier price position from filtered pool
+    pool_sorted = sorted(pool, key=lambda f: f.total_price_inr)
     if tier == "budget":
-        return economy[0] if economy else flights[0]
+        return pool_sorted[0]  # Cheapest in preferred pool
     elif tier == "standard":
-        pool = economy if economy else flights
-        return pool[len(pool) // 2]
+        return pool_sorted[len(pool_sorted) // 2]  # Mid
     else:  # premium
-        if business:
-            return max(business, key=lambda f: f.total_price_inr)
-        return flights[-1]  # Most expensive
+        return pool_sorted[-1]  # Most expensive in preferred pool
 
 
-def _pick_hotel(hotels: list[NormalizedHotel], tier: str) -> Optional[NormalizedHotel]:
-    """Pick hotel for a tier. Deterministic."""
+def _pick_hotel(hotels: list[NormalizedHotel], tier: str,
+                preferences: Optional[dict] = None) -> Optional[NormalizedHotel]:
+    """Pick hotel for a tier. Preference-driven, then deterministic.
+
+    If user has hotel_star_preference → ALL tiers prefer that star rating.
+    Within the filtered pool, pick by tier price position.
+    """
     if not hotels:
         return None
 
+    star_pref = preferences.get("hotel_star_preference") if preferences else None
+
+    if star_pref:
+        # User has a star preference — use it for ALL tiers
+        preferred_star = [h for h in hotels if h.star_rating == star_pref]
+        if tier == "premium":
+            # Premium: try preferred stars or one star up
+            premium_pool = [h for h in hotels if h.star_rating >= star_pref]
+            pool = premium_pool if premium_pool else (preferred_star if preferred_star else hotels)
+        else:
+            pool = preferred_star if preferred_star else hotels
+    else:
+        # No preference: use original tier-based star logic
+        if tier == "budget":
+            three_star = [h for h in hotels if h.star_rating == 3]
+            pool = three_star if three_star else hotels
+        elif tier == "standard":
+            four_star = [h for h in hotels if h.star_rating == 4]
+            pool = four_star if four_star else hotels
+        else:
+            five_star = [h for h in hotels if h.star_rating == 5]
+            pool = five_star if five_star else hotels
+
+    pool_sorted = sorted(pool, key=lambda h: h.total_stay_price_inr)
     if tier == "budget":
-        three_star = [h for h in hotels if h.star_rating == 3]
-        if three_star:
-            return min(three_star, key=lambda h: h.total_stay_price_inr)
-        return hotels[0]  # Cheapest
+        return pool_sorted[0]  # Cheapest in preferred pool
     elif tier == "standard":
-        four_star = [h for h in hotels if h.star_rating == 4]
-        if four_star:
-            return four_star[len(four_star) // 2]
-        return hotels[len(hotels) // 2]  # Mid-range
+        return pool_sorted[len(pool_sorted) // 2]  # Mid
     else:  # premium
-        five_star = [h for h in hotels if h.star_rating == 5]
-        if five_star:
-            return max(five_star, key=lambda h: h.total_stay_price_inr)
-        return hotels[-1]  # Most expensive
+        return pool_sorted[-1]  # Most expensive in preferred pool
 
 
 def _select_activities(
@@ -474,6 +535,8 @@ def build_tiers(
     nights: int,
     adults: int = 1,
     budget_inr: Optional[int] = None,
+    budget_min: Optional[int] = None,
+    budget_max: Optional[int] = None,
     preferences: Optional[dict] = None,
 ) -> list[TierSelection]:
     """
@@ -501,8 +564,8 @@ def build_tiers(
 
     tiers = []
     for tier_name, daily_cap in tier_configs:
-        flight = _pick_flight(flights, tier_name)
-        hotel = _pick_hotel(hotels, tier_name)
+        flight = _pick_flight(flights, tier_name, preferences)
+        hotel = _pick_hotel(hotels, tier_name, preferences)
         acts = _select_activities(activities, daily_cap, nights, adults)
         total = _compute_total(flight, hotel, acts, adults)
 
@@ -527,9 +590,10 @@ def build_tiers(
     tiers[1].tier = "standard"
     tiers[2].tier = "premium"
 
-    # Budget adaptation — only on budget tier
-    if budget_inr and tiers[0].estimated_total_inr > budget_inr:
-        adapted = _adapt_budget_tier(tiers[0], data, nights, adults, budget_inr)
+    # Budget adaptation — use budget_min as ceiling for budget tier
+    effective_budget = budget_min or budget_inr
+    if effective_budget and tiers[0].estimated_total_inr > effective_budget:
+        adapted = _adapt_budget_tier(tiers[0], data, nights, adults, effective_budget)
         if adapted:
             tiers[0] = adapted
 
@@ -821,8 +885,18 @@ def _build_corrected_package(
             "price_inr": int(tier_sel.flight.total_price_inr),
             "stops": tier_sel.flight.stops,
             "duration": tier_sel.flight.duration,
+            "departure_time": tier_sel.flight.departure_time,
+            "arrival_time": tier_sel.flight.arrival_time,
             "data_source": tier_sel.flight.data_source,
             "offer_id": tier_sel.flight.offer_id,
+            # Return flight
+            "return_carrier": tier_sel.flight.return_carrier,
+            "return_airline_name": tier_sel.flight.return_airline_name,
+            "return_flight_number": tier_sel.flight.return_flight_number,
+            "return_duration": tier_sel.flight.return_duration,
+            "return_stops": tier_sel.flight.return_stops,
+            "return_departure_time": tier_sel.flight.return_departure_time,
+            "return_arrival_time": tier_sel.flight.return_arrival_time,
         }
     else:
         flight_data = llm_narrative.get("flights", {

@@ -298,10 +298,13 @@ IATA_TO_COUNTRY = {
 def compute_profile_strength(travel_history: list[dict]) -> int:
     """
     Compute profile confidence score from booking/engagement history.
-    Only apply full inference if strength >= 2.
+    Apply inference at strength >= 1 (graduated confidence).
 
-    +1 if at least 3 entries within last 36 months
-    +1 if any entry within last 24 months
+    +1 if at least 1 entry within last 24 months
+    +1 if at least 2 entries within last 36 months
+
+    strength=1 → inference with confidence="low"
+    strength=2 → inference with confidence="high"
     """
     strength = 0
     cutoff_36mo = datetime.utcnow() - timedelta(days=1095)
@@ -318,9 +321,9 @@ def compute_profile_strength(travel_history: list[dict]) -> int:
             if ts > cutoff_24mo:
                 has_recent_24mo = True
 
-    if len(recent_entries) >= 3:
-        strength += 1
     if has_recent_24mo:
+        strength += 1
+    if len(recent_entries) >= 2:
         strength += 1
 
     return strength
@@ -529,6 +532,63 @@ def infer_hotel_preference(travel_history: list[dict]) -> tuple[int, str]:
     return 4, "default"
 
 
+def infer_budget(
+    travel_history: list[dict],
+    nlp_intent: dict,
+    user_prefs: Optional[dict] = None,
+) -> tuple[Optional[int], Optional[int], str]:
+    """
+    Infer budget range from recency-weighted booking history.
+    Returns: (budget_min, budget_max, source)
+
+    Uses weighted 25th/75th percentiles of past total_price_inr.
+    """
+    # Priority 1: NLP extracted budget
+    if nlp_intent.get("budget_inr"):
+        b = nlp_intent["budget_inr"]
+        return int(b * 0.8), int(b * 1.2), "nlp"
+
+    # Priority 2: Explicit user preferences
+    if user_prefs:
+        bmin = user_prefs.get("budget_range_min")
+        bmax = user_prefs.get("budget_range_max")
+        if bmin and bmax:
+            return bmin, bmax, "preferences"
+
+    # Priority 3: Weighted percentiles from booking history
+    if travel_history:
+        entries = [
+            (t["total_price_inr"], _compute_weight(t))
+            for t in travel_history
+            if t.get("total_price_inr") and t["total_price_inr"] > 0
+        ]
+        if len(entries) >= 2:
+            entries.sort(key=lambda x: x[0])
+            total_weight = sum(w for _, w in entries)
+            if total_weight > 0:
+                # Weighted 25th percentile
+                cumulative = 0
+                p25 = entries[0][0]
+                for price, w in entries:
+                    cumulative += w
+                    if cumulative >= total_weight * 0.25:
+                        p25 = price
+                        break
+
+                # Weighted 75th percentile
+                cumulative = 0
+                p75 = entries[-1][0]
+                for price, w in entries:
+                    cumulative += w
+                    if cumulative >= total_weight * 0.75:
+                        p75 = price
+                        break
+
+                return int(p25), int(p75), "history"
+
+    return None, None, "default"
+
+
 def infer_airline_preference(
     travel_history: list[dict],
     user_prefs: Optional[dict] = None,
@@ -590,10 +650,12 @@ def resolve_all(
     Returns resolved dict with all travel parameters + inference sources for logging.
     """
     profile_strength = compute_profile_strength(travel_history)
-    use_full_profile = profile_strength >= 2
+    use_full_profile = profile_strength >= 1
+    profile_confidence = "high" if profile_strength >= 2 else ("low" if profile_strength == 1 else "none")
 
     inference_log = {
         "profile_strength": profile_strength,
+        "profile_confidence": profile_confidence,
         "use_full_profile": use_full_profile,
         "booking_count": sum(1 for t in travel_history if t.get("signal_strength", 1.0) >= 1.0),
         "engagement_count": sum(1 for t in travel_history if t.get("signal_strength", 1.0) < 1.0),
@@ -641,9 +703,21 @@ def resolve_all(
     inference_log["duration_source"] = duration_source
 
     # --- Budget ---
+    if explicit_budget:
+        budget_min, budget_max = int(explicit_budget * 0.8), int(explicit_budget * 1.2)
+        budget_source = "explicit"
+    elif use_full_profile:
+        budget_min, budget_max, budget_source = infer_budget(
+            travel_history, nlp_intent, user_prefs
+        )
+    else:
+        budget_min, budget_max, budget_source = infer_budget(
+            [], nlp_intent, user_prefs
+        )
+    # Keep scalar budget for backward compat
     budget = explicit_budget or nlp_intent.get("budget_inr")
-    budget_source = "explicit" if explicit_budget else ("nlp" if budget else "none")
     inference_log["budget_source"] = budget_source
+    inference_log["budget_range"] = [budget_min, budget_max]
 
     # --- Cabin ---
     if use_full_profile:
@@ -674,6 +748,8 @@ def resolve_all(
         "destination_iata": dest_iata,
         "duration_days": duration,
         "budget_inr": budget,
+        "budget_min": budget_min,
+        "budget_max": budget_max,
         "cabin_preference": cabin,
         "hotel_star_preference": hotel_pref,
         "preferred_airlines": airlines,

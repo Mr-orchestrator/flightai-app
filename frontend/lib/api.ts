@@ -239,7 +239,17 @@ export interface FlightEstimate {
   flight_number?: string;
   stops?: number;
   duration?: string;
+  departure_time?: string;
+  arrival_time?: string;
   data_source?: 'amadeus' | 'estimated';
+  // Return flight
+  return_carrier?: string;
+  return_airline_name?: string;
+  return_flight_number?: string;
+  return_duration?: string;
+  return_stops?: number;
+  return_departure_time?: string;
+  return_arrival_time?: string;
 }
 
 export interface TravelPackage {
@@ -310,6 +320,11 @@ export interface AutoPackageResponse {
   // Profile intelligence metadata
   resolved_origin?: { iata: string; source: string };
   booking_count?: number;
+  // Travel dates
+  departure_date?: string;
+  return_date?: string;
+  // LLM availability
+  llm_available?: boolean;
 }
 
 export interface NLPParseRequest {
@@ -481,6 +496,95 @@ export const trackEngagement = async (
   } catch (error) {
     // Fire-and-forget: log but don't throw
     console.warn('Engagement tracking failed:', error);
+  }
+};
+
+// ==================== SUGGESTED DESTINATIONS ====================
+
+export interface SuggestedDestination {
+  city: string;
+  iata: string;
+  emoji: string;
+  budget_est: number;
+  days: number;
+}
+
+export const getSuggestedDestinations = async (): Promise<SuggestedDestination[]> => {
+  try {
+    const response = await api.get<{ success: boolean; suggestions: SuggestedDestination[] }>('/suggested-destinations');
+    return response.data.suggestions;
+  } catch (error) {
+    console.error('Error fetching suggestions:', error);
+    return [];
+  }
+};
+
+// ==================== PROFILE DEFAULTS ====================
+
+export interface ProfileDefaults {
+  origin_iata: string;
+  duration_days: number;
+  cabin_preference: string;
+  hotel_star_preference: number;
+  budget_min: number | null;
+  budget_max: number | null;
+  preferred_airlines: string[];
+  inference_log: Record<string, unknown>;
+}
+
+export const getProfileDefaults = async (): Promise<ProfileDefaults> => {
+  try {
+    const response = await api.get<ProfileDefaults>('/profile-defaults');
+    return response.data;
+  } catch (error) {
+    console.error('Error fetching profile defaults:', error);
+    throw new Error('Failed to fetch profile defaults');
+  }
+};
+
+// ==================== MY TRIPS ====================
+
+export interface SavedTrip {
+  id: string;
+  tier: string;
+  destination_iata: string;
+  destination_city: string;
+  departure_date: string | null;
+  return_date: string | null;
+  total_package_inr: number | null;
+  created_at: string | null;
+  has_detail: boolean;
+}
+
+export interface TripDetail {
+  id: string;
+  tier: string;
+  destination_iata: string;
+  destination_city: string;
+  departure_date: string | null;
+  return_date: string | null;
+  total_package_inr: number | null;
+  created_at: string | null;
+  package: TravelPackage | null;
+}
+
+export const getMyTrips = async (): Promise<SavedTrip[]> => {
+  try {
+    const response = await api.get<{ success: boolean; trips: SavedTrip[] }>('/my-trips');
+    return response.data.trips;
+  } catch (error) {
+    console.error('Error fetching trips:', error);
+    throw new Error('Failed to fetch saved trips');
+  }
+};
+
+export const getTripDetail = async (tripId: string): Promise<TripDetail> => {
+  try {
+    const response = await api.get<{ success: boolean; trip: TripDetail }>(`/my-trips/${tripId}`);
+    return response.data.trip;
+  } catch (error) {
+    console.error('Error fetching trip detail:', error);
+    throw new Error('Failed to fetch trip detail');
   }
 };
 

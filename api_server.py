@@ -419,6 +419,139 @@ async def track_engagement(
         return {"success": False, "error": str(e)}
 
 
+# ==================== MY TRIPS ENDPOINTS ====================
+
+@app.get("/my-trips")
+async def get_my_trips(current_user: dict = Depends(get_current_user)):
+    """Get all saved trips for the current user."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(PackageSnapshot)
+            .where(PackageSnapshot.user_id == current_user["user_id"])
+            .order_by(PackageSnapshot.created_at.desc())
+        )
+        snapshots = result.scalars().all()
+
+        trips = []
+        for s in snapshots:
+            trips.append({
+                "id": s.id,
+                "tier": s.tier,
+                "destination_iata": s.destination_iata,
+                "destination_city": s.destination_city or "",
+                "departure_date": s.departure_date,
+                "return_date": s.return_date,
+                "total_package_inr": s.total_package_inr,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "has_detail": s.package_json is not None,
+            })
+
+        return {"success": True, "trips": trips}
+
+
+@app.get("/my-trips/{trip_id}")
+async def get_trip_detail(trip_id: str, current_user: dict = Depends(get_current_user)):
+    """Get full trip detail including package JSON."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(PackageSnapshot)
+            .where(
+                PackageSnapshot.id == trip_id,
+                PackageSnapshot.user_id == current_user["user_id"],
+            )
+        )
+        snapshot = result.scalar_one_or_none()
+        if not snapshot:
+            raise HTTPException(status_code=404, detail="Trip not found")
+
+        return {
+            "success": True,
+            "trip": {
+                "id": snapshot.id,
+                "tier": snapshot.tier,
+                "destination_iata": snapshot.destination_iata,
+                "destination_city": snapshot.destination_city or "",
+                "departure_date": snapshot.departure_date,
+                "return_date": snapshot.return_date,
+                "total_package_inr": snapshot.total_package_inr,
+                "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+                "package": snapshot.package_json,
+            },
+        }
+
+
+@app.get("/suggested-destinations")
+async def get_suggested_destinations(current_user: dict = Depends(get_current_user)):
+    """Suggest 3 personalized destinations based on profile. No Amadeus calls."""
+    history_dicts, prefs_dict, home_airport = await _load_user_context(
+        current_user["user_id"]
+    )
+
+    # Get visited destinations
+    visited = set()
+    for h in history_dicts:
+        if h.get("destination_iata"):
+            visited.add(h["destination_iata"])
+
+    # Popular destinations with estimated pricing
+    all_destinations = [
+        {"city": "Dubai", "iata": "DXB", "emoji": "🏙️", "budget_est": 65000, "days": 5},
+        {"city": "Bangkok", "iata": "BKK", "emoji": "🏯", "budget_est": 55000, "days": 5},
+        {"city": "Bali", "iata": "DPS", "emoji": "🏖️", "budget_est": 85000, "days": 7},
+        {"city": "Singapore", "iata": "SIN", "emoji": "🌃", "budget_est": 75000, "days": 5},
+        {"city": "Tokyo", "iata": "NRT", "emoji": "🗼", "budget_est": 120000, "days": 8},
+        {"city": "Paris", "iata": "CDG", "emoji": "🗼", "budget_est": 150000, "days": 7},
+        {"city": "London", "iata": "LHR", "emoji": "🎡", "budget_est": 140000, "days": 7},
+        {"city": "Maldives", "iata": "MLE", "emoji": "🏝️", "budget_est": 110000, "days": 5},
+        {"city": "Istanbul", "iata": "IST", "emoji": "🕌", "budget_est": 70000, "days": 5},
+        {"city": "Phuket", "iata": "HKT", "emoji": "🏖️", "budget_est": 60000, "days": 6},
+    ]
+
+    # Filter out visited + prioritize preferred destinations from prefs
+    preferred = set()
+    if prefs_dict and prefs_dict.get("preferred_destinations"):
+        for d in prefs_dict["preferred_destinations"]:
+            preferred.add(d.upper()[:3])
+
+    suggestions = []
+    # First add preferred but unvisited
+    for dest in all_destinations:
+        if dest["iata"] in preferred and dest["iata"] not in visited:
+            suggestions.append(dest)
+    # Then fill with unvisited popular
+    for dest in all_destinations:
+        if dest["iata"] not in visited and dest not in suggestions:
+            suggestions.append(dest)
+        if len(suggestions) >= 3:
+            break
+
+    return {"success": True, "suggestions": suggestions[:3]}
+
+
+@app.get("/profile-defaults")
+async def get_profile_defaults(current_user: dict = Depends(get_current_user)):
+    """Return inferred defaults for the logged-in user (origin, duration, cabin, hotel star, budget)."""
+    history_dicts, prefs_dict, home_airport = await _load_user_context(
+        current_user["user_id"]
+    )
+    resolved = resolve_profile(
+        travel_history=history_dicts,
+        nlp_intent={},
+        user_home_airport=home_airport,
+        user_prefs=prefs_dict,
+    )
+    return {
+        "origin_iata": resolved.get("origin_iata", "BOM"),
+        "duration_days": resolved.get("duration_days", 7),
+        "cabin_preference": resolved.get("cabin_preference", "ECONOMY"),
+        "hotel_star_preference": resolved.get("hotel_star_preference", 4),
+        "budget_min": resolved.get("budget_min"),
+        "budget_max": resolved.get("budget_max"),
+        "preferred_airlines": resolved.get("preferred_airlines", []),
+        "inference_log": resolved.get("inference_log", {}),
+    }
+
+
 # ==================== NLP + PERSONALIZATION ENDPOINTS ====================
 
 @app.post("/nlp-parse")
@@ -668,12 +801,15 @@ def _make_cache_key(key_type: str, origin: str, dest: str, date: str,
 
 
 async def _save_snapshot(user_id: str, pkg_result: dict):
-    """Save PackageSnapshot for each generated tier."""
+    """Save PackageSnapshot for each generated tier, including full package JSON."""
     packages = pkg_result.get("packages", [])
     if not packages:
         return
 
     now = datetime.utcnow()
+    dep_date = pkg_result.get("departure_date")
+    ret_date = pkg_result.get("return_date")
+
     async with async_session() as session:
         for pkg in packages:
             snapshot = PackageSnapshot(
@@ -681,12 +817,16 @@ async def _save_snapshot(user_id: str, pkg_result: dict):
                 user_id=user_id,
                 tier=pkg.get("tier", "unknown"),
                 destination_iata=pkg.get("destination_iata", ""),
+                destination_city=pkg.get("destination_city", ""),
+                departure_date=dep_date,
+                return_date=ret_date,
                 flight_offer_id=pkg.get("flight_offer_id"),
                 hotel_offer_id=pkg.get("hotel_offer_id"),
                 activity_ids=pkg.get("activity_ids", []),
                 flight_price_inr=pkg.get("flight_price_inr"),
                 hotel_total_inr=pkg.get("hotel_total_inr"),
                 total_package_inr=pkg.get("estimated_total_inr"),
+                package_json=pkg,
                 fx_rate_used=pkg.get("fx_rate_used"),
                 created_at=now,
                 flight_expires_at=now + timedelta(minutes=15),
@@ -728,6 +868,12 @@ async def get_auto_packages(
         destination_iata = resolved["destination_iata"]
         duration = resolved["duration_days"]
         budget = resolved["budget_inr"]
+        budget_min = resolved.get("budget_min")
+        budget_max = resolved.get("budget_max")
+
+        # Compute dates for the non-streaming endpoint
+        dep_date = (datetime.utcnow() + timedelta(days=14)).strftime("%Y-%m-%d")
+        ret_date = (datetime.utcnow() + timedelta(days=14 + duration)).strftime("%Y-%m-%d")
 
         # Generate packages (blocking call via thread)
         pkg_result = await asyncio.to_thread(
@@ -738,7 +884,11 @@ async def get_auto_packages(
             origin_iata=origin,
             duration_days=duration,
             budget_inr=budget,
+            budget_min=budget_min,
+            budget_max=budget_max,
             destination_iata=destination_iata,
+            departure_date=dep_date,
+            return_date=ret_date,
         )
 
         # Add inference metadata to response
@@ -814,10 +964,14 @@ async def get_auto_packages_stream(
             destination_iata = resolved["destination_iata"]
             duration = resolved["duration_days"]
             budget = resolved["budget_inr"]
+            budget_min = resolved.get("budget_min")
+            budget_max = resolved.get("budget_max")
 
+            cabin_pref = resolved.get("cabin_preference", "ECONOMY")
+            hotel_star = resolved.get("hotel_star_preference", 4)
             yield send_event("progress", {
                 "step": "profile",
-                "message": f"Resolved: {origin} → {destination_iata or destination}",
+                "message": f"Profile: {cabin_pref.replace('_', ' ').title()} · {hotel_star}★ hotels · from {origin}",
                 "percent": 20
             })
 
@@ -892,7 +1046,7 @@ async def get_auto_packages_stream(
                     _cache.set(activity_key, activities_data, CACHE_TTL_ACTIVITIES)
 
             yield send_event("progress", {
-                "step": "flights", "message": "Searching flights...", "percent": 25
+                "step": "flights", "message": f"Searching {origin} → {destination_iata} flights...", "percent": 25
             })
 
             # Run all 3 fetches in parallel with individual timeouts
@@ -900,9 +1054,9 @@ async def get_auto_packages_stream(
             hotel_task = asyncio.create_task(fetch_hotels())
             activity_task = asyncio.create_task(fetch_activities())
 
-            # Wait for flights first (usually fastest to resolve UX)
+            # Wait for flights first — needs 30s because it searches ECONOMY + BUSINESS sequentially
             try:
-                await asyncio.wait_for(flight_task, timeout=15)
+                await asyncio.wait_for(flight_task, timeout=30)
             except asyncio.TimeoutError:
                 logger.warning("Flight fetch timed out")
                 flights_data = {"flights": {"economy": [], "business": [], "all": []}, "total": 0, "errors": ["timeout"]}
@@ -910,16 +1064,16 @@ async def get_auto_packages_stream(
             flight_count = flights_data.get("total", 0) if isinstance(flights_data, dict) else 0
             yield send_event("progress", {
                 "step": "flights",
-                "message": f"Found {flight_count} flights" + (" (cached)" if cached_flights else ""),
+                "message": f"Found {flight_count} flights {origin} → {destination_iata}",
                 "percent": 40
             })
 
             yield send_event("progress", {
-                "step": "hotels", "message": "Searching hotels...", "percent": 45
+                "step": "hotels", "message": f"Checking {hotel_star}★ hotels in {destination or destination_iata}...", "percent": 45
             })
 
             try:
-                await asyncio.wait_for(hotel_task, timeout=15)
+                await asyncio.wait_for(hotel_task, timeout=30)
             except asyncio.TimeoutError:
                 logger.warning("Hotel fetch timed out")
                 hotels_data = {"hotels": [], "total": 0, "error": "timeout"}
@@ -927,16 +1081,16 @@ async def get_auto_packages_stream(
             hotel_count = hotels_data.get("total", 0) if isinstance(hotels_data, dict) else 0
             yield send_event("progress", {
                 "step": "hotels",
-                "message": f"Found {hotel_count} hotels" + (" (cached)" if cached_hotels else ""),
+                "message": f"Found {hotel_count} hotels in {destination or destination_iata}",
                 "percent": 55
             })
 
             yield send_event("progress", {
-                "step": "activities", "message": "Finding activities...", "percent": 60
+                "step": "activities", "message": f"Finding things to do in {destination or destination_iata}...", "percent": 60
             })
 
             try:
-                await asyncio.wait_for(activity_task, timeout=15)
+                await asyncio.wait_for(activity_task, timeout=20)
             except asyncio.TimeoutError:
                 logger.warning("Activity fetch timed out")
                 activities_data = {"activities": [], "total": 0, "error": "timeout"}
@@ -944,7 +1098,7 @@ async def get_auto_packages_stream(
             activity_count = activities_data.get("total", 0) if isinstance(activities_data, dict) else 0
             yield send_event("progress", {
                 "step": "activities",
-                "message": f"Found {activity_count} activities" + (" (cached)" if cached_activities else ""),
+                "message": f"Found {activity_count} activities & experiences",
                 "percent": 70
             })
 
@@ -961,7 +1115,11 @@ async def get_auto_packages_stream(
                 origin_iata=origin,
                 duration_days=duration,
                 budget_inr=budget,
+                budget_min=budget_min,
+                budget_max=budget_max,
                 destination_iata=destination_iata,
+                departure_date=dep_date,
+                return_date=ret_date,
                 prefetched_flights=flights_data,
                 prefetched_hotels=hotels_data,
                 prefetched_activities=activities_data,

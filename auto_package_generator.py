@@ -84,6 +84,15 @@ def _fetch_real_flights(amadeus: AmadeusFlightSearch, origin: str, destination: 
                             "data_source": "amadeus",
                             "offer_id": f.get("id"),
                         }
+                        # Extract return flight details if available
+                        if 'return' in f and f['return']:
+                            flight_summary["return_carrier"] = f['return'].get('carrier', '')
+                            flight_summary["return_airline_name"] = get_airline_name(f['return'].get('carrier', ''))
+                            flight_summary["return_flight_number"] = f"{f['return'].get('carrier', '')}{f['return'].get('flight_number', '')}"
+                            flight_summary["return_duration"] = f['return'].get('duration', '')
+                            flight_summary["return_stops"] = f['return'].get('stops', 0)
+                            flight_summary["return_departure_time"] = f['return']['departure'].get('time', '')
+                            flight_summary["return_arrival_time"] = f['return']['arrival'].get('time', '')
                         flights_data[key].append(flight_summary)
                         flights_data["all"].append(flight_summary)
             except Exception as e:
@@ -106,6 +115,19 @@ def _fetch_real_flights(amadeus: AmadeusFlightSearch, origin: str, destination: 
 def _fetch_real_hotels(amadeus: AmadeusFlightSearch, city_code: str,
                        check_in: str, check_out: str, adults: int = 1) -> dict:
     """Fetch real hotel data from Amadeus."""
+    # Currency conversion for non-INR hotel prices
+    HOTEL_FX_TO_INR = {
+        "INR": 1.0, "USD": 83.5, "EUR": 91.0, "GBP": 105.0,
+        "NZD": 52.0, "AUD": 55.0, "SGD": 62.0, "THB": 2.35,
+        "AED": 22.7, "MYR": 18.5, "HKD": 10.7, "JPY": 0.56,
+        "KRW": 0.063, "CNY": 11.5, "QAR": 22.9, "SAR": 22.3,
+        "BHD": 221.0, "OMR": 217.0, "KWD": 272.0, "LKR": 0.26,
+        "MVR": 5.4, "IDR": 0.0053, "PHP": 1.5, "VND": 0.0034,
+        "CAD": 62.0, "CHF": 95.0, "SEK": 8.0, "NOK": 7.8,
+        "DKK": 12.2, "TRY": 2.6, "ZAR": 4.6, "BRL": 16.7,
+        "MXN": 4.8, "EGP": 1.7, "KES": 0.65, "NPR": 0.63,
+        "MUR": 1.8,
+    }
     try:
         result = amadeus.search_hotels_by_city(
             city_code=city_code,
@@ -119,13 +141,30 @@ def _fetch_real_hotels(amadeus: AmadeusFlightSearch, city_code: str,
         if result.get('success') and result.get('hotels'):
             hotels = []
             for h in result['hotels']:
+                raw_ppn = float(h.get('price_per_night') or 0)
+                raw_total = float(h.get('price_total') or 0)
+                currency = (h.get('currency') or 'INR').upper()
+
+                # Convert to INR if Amadeus returned a different currency
+                if currency != 'INR' and currency in HOTEL_FX_TO_INR:
+                    fx = HOTEL_FX_TO_INR[currency]
+                    ppn_inr = raw_ppn * fx
+                    total_inr = raw_total * fx
+                elif currency != 'INR':
+                    # Unknown currency — use USD rate as safe fallback
+                    ppn_inr = raw_ppn * 83.5
+                    total_inr = raw_total * 83.5
+                else:
+                    ppn_inr = raw_ppn
+                    total_inr = raw_total
+
                 hotels.append({
                     "hotel_id": h.get("hotel_id", ""),
                     "name": h['name'],
                     "star_rating": h.get('star_rating'),
-                    "price_per_night_inr": h.get('price_per_night', 0),
-                    "price_total_inr": h.get('price_total', 0),
-                    "currency": h.get('currency', 'INR'),
+                    "price_per_night_inr": round(ppn_inr, 2),
+                    "price_total_inr": round(total_inr, 2),
+                    "currency": "INR",
                     "room_type": h.get('room_type', 'STANDARD'),
                     "nights": h.get('nights', 1),
                     "data_source": h.get("data_source", "amadeus"),
@@ -384,6 +423,8 @@ def generate_packages(
     origin_iata: str = "BOM",
     duration_days: int = 7,
     budget_inr: Optional[int] = None,
+    budget_min: Optional[int] = None,
+    budget_max: Optional[int] = None,
     destination_iata: Optional[str] = None,
     departure_date: Optional[str] = None,
     return_date: Optional[str] = None,
@@ -418,6 +459,9 @@ def generate_packages(
         "amadeus_data": {"flights_found": 0, "hotels_found": 0, "activities_found": 0},
         "tier_totals": {},
         "validation_warnings": [],
+        "departure_date": None,
+        "return_date": None,
+        "llm_available": True,
     }
 
     # --- Step 1: Resolve destination ---
@@ -451,6 +495,10 @@ def generate_packages(
             return_date = (datetime.now() + timedelta(days=8 + duration_days)).strftime("%Y-%m-%d")
 
     nights = duration_days
+
+    # Store computed dates in result
+    result["departure_date"] = departure_date
+    result["return_date"] = return_date
 
     # --- Step 2: Fetch Amadeus data (or use prefetched) ---
     if prefetched_flights is not None:
@@ -495,7 +543,10 @@ def generate_packages(
     # --- Step 4: Build tiers (deterministic) ---
     tier_selections = build_tiers(
         normalized, nights=nights, adults=1,
-        budget_inr=budget_inr, preferences=preferences,
+        budget_inr=budget_inr,
+        budget_min=budget_min,
+        budget_max=budget_max,
+        preferences=preferences,
     )
 
     result["tier_totals"] = {
@@ -517,6 +568,7 @@ def generate_packages(
         all_errors = claude_errors
 
     result["model_used"] = model_used
+    result["llm_available"] = raw_text is not None
 
     # Parse LLM JSON
     llm_json = {}
